@@ -1,3 +1,8 @@
+已知道问题:
+           1  镜像移动在配置页打开开关,详情页可能不会同步打开
+           2  配置页无法直接添加目录配置
+
+
 # MoviePilot Plugins
 
 本仓库是 [MoviePilot](https://github.com/jxxghp/MoviePilot) V3 的第三方插件仓库（布局：`package.v3.json` + `plugins.v3/<插件ID小写>/`）。
