@@ -28,6 +28,7 @@ from .engine import (
     EventDispatcher,
     _scope_for,
     apply_event,
+    in_mirror_recycle,
     is_organize_candidate,
     match_mirror_rule,
     match_organize_rule,
@@ -277,7 +278,7 @@ class Cd2StrmSync(_PluginBase):
         "对象移到回收站（保护白名单命中的对象不移动）。三者互不影响，共用通知。"
     )
     plugin_icon = "https://raw.githubusercontent.com/thsrite/MoviePilot-Plugins/main/icons/create.png"
-    plugin_version = "1.18.0"
+    plugin_version = "1.34.0"
     plugin_author = "mtno1"
     plugin_label = "云盘"
     plugin_config_prefix = "cd2strmsync_"
@@ -378,6 +379,10 @@ class Cd2StrmSync(_PluginBase):
         self._dispatcher.start()
         self._start_organize_worker()
         self._start_mirror_worker()
+        # 启动时补一次回填：让上次遗留的「处理中」通知（例如路径对不上而没回填的改名事件）
+        # 在插件重载/重启后就能显示真实结果，不用等下一次扫描
+        for index in range(len(self._rules)):
+            self._reconcile_events(index)
         labels = "、".join(profile["label"] for profile in self._connections)
         logger.info(
             f"CD2 Strm 同步插件已启动，共 {len(self._rules)} 组目录规则，"
@@ -556,6 +561,32 @@ class Cd2StrmSync(_PluginBase):
         config["mirror_count"] = len(mirror_rules)
         return [build_form(config, rules, organize_rules, mirror_rules)], config
 
+    def _events_for_page(self) -> List[Dict[str, Any]]:
+        """详情页用的命中通知（最新在前），并给历史事件补上「镜像移入回收站」标记。
+
+        旧版本记录的事件没有 own_move 字段，这里按回收站目标现算一次，
+        免得历史行继续显示成「改名」、或者一直挂在「处理中」。
+        """
+        events = list(reversed(self._events))[:MAX_EVENTS]
+        if not self._mirror_rules:
+            return events
+        patched: List[Dict[str, Any]] = []
+        for event in events:
+            if event.get("own_move") or str(event.get("change_type") or "") != "rename":
+                patched.append(event)
+                continue
+            new_path = str(event.get("new_path") or "")
+            if not new_path or not in_mirror_recycle(self._mirror_rules, new_path):
+                patched.append(event)
+                continue
+            item = dict(event)
+            item["own_move"] = True
+            item["internal"] = True
+            item["done"] = True
+            item["result"] = str(event.get("result") or "") or "已移入回收站"
+            patched.append(item)
+        return patched
+
     def get_page(self) -> List[dict]:
         """返回插件详情页：状态、目录组操作按钮与最近事件。"""
         if not self._enabled:
@@ -584,15 +615,22 @@ class Cd2StrmSync(_PluginBase):
         others: List[Dict[str, Any]] = []
         if not self._globals.get("notify_only_matched"):
             others = list(reversed(self._ignored_events))[:MAX_EVENTS]
+        display = dict(self._display)
+        # 详情页通知合并显示：开关关闭时窗口置 0（等于不合并）
+        display["merge_seconds"] = (
+            int(self._globals.get("notify_merge_seconds") or 0)
+            if self._globals.get("notify_merge", True)
+            else 0
+        )
         return build_page(
             self.__class__.__name__,
             str(getattr(settings, "API_TOKEN", "") or ""),
             self._status_snapshot(),
             self._rules,
             self._rule_stats,
-            list(reversed(self._events))[:MAX_EVENTS],
+            self._events_for_page(),
             list(reversed(self._actions))[:MAX_EVENTS],
-            dict(self._display),
+            display,
             others,
             self._ignored_count,
             self._excluded_count,
@@ -1954,7 +1992,14 @@ class Cd2StrmSync(_PluginBase):
         rule_name = ""
         if rule_index is not None and category == "matched":
             rule_name = self._rules[rule_index].display_name(rule_index)
-        if category == "matched" and self._dispatcher:
+        # 镜像移动的回声：CD2 把「移进回收站」报成 rename，这类通知是本插件自己的动作，
+        # 只登记一条可追溯记录，不再进 STRM 处理链（否则会留下永远「处理中」的幽灵行）
+        own_move = (
+            change_type == "rename"
+            and bool(raw_new)
+            and in_mirror_recycle(self._mirror_rules, self._to_container_path(raw_new))
+        )
+        if category == "matched" and self._dispatcher and not own_move:
             container_path = self._to_container_path(raw_path)
             new_path = self._to_container_path(raw_new) if raw_new else ""
             hit = self._dispatcher.submit(
@@ -1976,6 +2021,7 @@ class Cd2StrmSync(_PluginBase):
             source,
             category,
             self._to_container_path(raw_new) if raw_new else "",
+            own_move=own_move,
         )
 
     def _to_container_path(self, raw_path: str) -> str:
@@ -2017,8 +2063,13 @@ class Cd2StrmSync(_PluginBase):
         source: str = "",
         category: str = "rule_miss",
         new_path: str = "",
+        own_move: bool = False,
     ) -> None:
-        """记录一条变更事件：命中的进「CD2 通知」，其余按类别归档。"""
+        """记录一条变更事件：命中的进「CD2 通知」，其余按类别归档。
+
+        own_move=True 表示这是「镜像移动把对象移进回收站」的回声通知：受理即完成，
+        不再进处理队列，页面上显示「移入回收站」并标注自身生成。
+        """
         record = {
             "time": datetime.now().strftime("%m-%d %H:%M:%S"),
             "change_type": change_type,
@@ -2030,9 +2081,10 @@ class Cd2StrmSync(_PluginBase):
             "new_path": new_path,
             "source": source,
             "category": category,
-            "internal": category == "internal",
-            "done": False,
-            "result": "",
+            "internal": category == "internal" or own_move,
+            "own_move": own_move,
+            "done": own_move,
+            "result": "已移入回收站" if own_move else "",
         }
         with self._state_lock:
             if category == "excluded":
@@ -2194,6 +2246,59 @@ class Cd2StrmSync(_PluginBase):
         if new_record and self._notify:
             self._schedule_record_notify(current, name)
 
+    def _reconcile_candidates(self, event: Dict[str, Any]) -> List[Path]:
+        """回填用的候选对象：先事件自身路径，再改名事件的目标路径。
+
+        CD2 的暂存/内部路径（例如 /115/media/AAA/…）在容器里并不存在，真正的落点是
+        改名事件里的 new_path（媒体库里的新位置），只看 path 会让这类通知永远停在「处理中」。
+        """
+        candidates: List[str] = []
+        for value in (event.get("path"), event.get("new_path")):
+            text = str(value or "")
+            if text and text not in candidates:
+                candidates.append(text)
+        return [Path(item) for item in candidates]
+
+    def _reconcile_source(
+        self, rule: SyncRule, event: Dict[str, Any], source: Path
+    ) -> bool:
+        """按一个候选路径判定该通知是否已完成；完成则回填并返回 True。"""
+        suffix = source.suffix.lower()
+        if suffix in rule.link_ext_set:
+            target = target_path(rule, source)
+            if target is not None and target.exists():
+                event["done"] = True
+                event["result"] = (
+                    "已生成 strm" if target.suffix.lower() == ".strm" else "已生成软链接"
+                )
+                return True
+            if event.get("change_type") == "delete" and not source.exists():
+                event["done"] = True
+                event["result"] = "已清理"
+                return True
+            return False
+        if event.get("is_dir"):
+            event["done"] = True
+            event["result"] = "已扫描"
+            return True
+        if suffix in rule.metadata_ext_set:
+            # 元数据按原名复制，目标与源同名；不再让这类通知永远停在「处理中」
+            if not rule.update_metadata:
+                event["done"] = True
+                event["result"] = "跳过：未开启元数据同步"
+                return True
+            target = metadata_target_path(rule, source)
+            if target is not None and target.exists():
+                event["done"] = True
+                event["result"] = "已同步元数据"
+                return True
+            if event.get("change_type") == "delete" and not source.exists():
+                event["done"] = True
+                event["result"] = "已清理"
+                return True
+            return False
+        return False
+
     def _reconcile_events(self, index: int) -> None:
         """用扫描结果回填通知的完成状态，供页面显示完成标记。"""
         if not 0 <= index < len(self._rules):
@@ -2204,42 +2309,10 @@ class Cd2StrmSync(_PluginBase):
             for event in self._events:
                 if event.get("done") or event.get("rule_index") != index:
                     continue
-                path = str(event.get("path") or "")
-                if not path:
-                    continue
-                source = Path(path)
-                if source.suffix.lower() in rule.link_ext_set:
-                    target = target_path(rule, source)
-                    if target is not None and target.exists():
-                        event["done"] = True
-                        event["result"] = (
-                            "已生成 strm" if target.suffix.lower() == ".strm" else "已生成软链接"
-                        )
+                for source in self._reconcile_candidates(event):
+                    if self._reconcile_source(rule, event, source):
                         changed = True
-                    elif event.get("change_type") == "delete" and not source.exists():
-                        event["done"] = True
-                        event["result"] = "已清理"
-                        changed = True
-                elif event.get("is_dir"):
-                    event["done"] = True
-                    event["result"] = "已扫描"
-                    changed = True
-                elif source.suffix.lower() in rule.metadata_ext_set:
-                    # 元数据按原名复制，目标与源同名；不再让这类通知永远停在「处理中」
-                    if not rule.update_metadata:
-                        event["done"] = True
-                        event["result"] = "跳过：未开启元数据同步"
-                        changed = True
-                        continue
-                    target = metadata_target_path(rule, source)
-                    if target is not None and target.exists():
-                        event["done"] = True
-                        event["result"] = "已同步元数据"
-                        changed = True
-                    elif event.get("change_type") == "delete" and not source.exists():
-                        event["done"] = True
-                        event["result"] = "已清理"
-                        changed = True
+                        break
             if changed:
                 self._dirty = True
         if changed:
@@ -2330,6 +2403,11 @@ class Cd2StrmSync(_PluginBase):
             connections.append(
                 {
                     "label": label,
+                    "host": (
+                        str(self._connections[index].get("host") or "")
+                        if index < len(self._connections)
+                        else ""
+                    ),
                     "connected": bool(data.get("connected")),
                     "message_count": int(data.get("message_count") or 0),
                 }

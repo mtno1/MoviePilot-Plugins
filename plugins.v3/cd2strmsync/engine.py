@@ -1125,6 +1125,31 @@ def to_mirror_internal(rule: Any, path: str) -> str:
     return target
 
 
+def in_mirror_recycle(rules: List[Any], container_path: str) -> bool:
+    """判断路径是否落在某个镜像组的回收站（路径 3）之内。
+
+    用途：识别「插件自己把对象移进回收站」产生的回声通知。CD2 只上报三种变更码
+    （0 新增 / 1 删除 / 2 改名，移动也走 2 并带 new_path），所以镜像移动完回推的
+    通知看起来像「改名」，需要按回收站目标认出来，避免再进 STRM 处理链。
+    容器路径与 CD2 内部路径两种写法都认。
+    """
+    target = normalize_path(container_path)
+    if not target:
+        return False
+    for rule in rules or []:
+        recycle = normalize_path(str(getattr(rule, "path3", "") or ""))
+        mirror = normalize_path(str(getattr(rule, "path2", "") or ""))
+        # 回收站必须独立于镜像目录：两者相同（或未配置）时不能据此判定为自己的动作
+        if not recycle or recycle == mirror:
+            continue
+        if target == recycle or target.startswith(f"{recycle}/"):
+            return True
+        internal = to_mirror_internal(rule, recycle)
+        if internal and (target == internal or target.startswith(f"{internal}/")):
+            return True
+    return False
+
+
 def match_mirror_rule(rules: List[Any], container_path: str) -> Optional[int]:
     """按「监听目录」匹配镜像组，返回下标；只认监听目录内的对象。
 

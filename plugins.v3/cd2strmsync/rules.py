@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -290,12 +291,39 @@ def rule_key(index: int, field_name: str) -> str:
     return f"{RULE_KEY_PREFIX}{index}_{field_name}"
 
 
+def rule_field_names() -> List[str]:
+    """规则的全部字段名（配置键后缀）。
+
+    配置页的「复制这一组」据此生成逐字段赋值脚本，新增字段时不用再手动同步一份名单。
+    """
+    return [item.name for item in dataclasses.fields(SyncRule)]
+
+
+def is_blank_rule(rule: SyncRule) -> bool:
+    """判断一个目录组是不是完全空白（配置页的复制槽位没用上时会留下空键）。"""
+    return not any(
+        str(getattr(rule, name, "") or "").strip()
+        for name in ("name", "media_dir", "local_dir", "exclude_dirs")
+    )
+
+
 def parse_rules(config: Optional[Dict[str, Any]]) -> List[SyncRule]:
-    """从插件配置中解析全部规则，保持顺序与占位空组。"""
+    """从插件配置中解析全部规则，保持顺序与占位空组。
+
+    配置页「复制这一组」会把内容写进新的槽位，这些键会先于 rule_count 出现，
+    因此这里按实际存在的 r{i}_* 键补足组数；补出来的**尾部空组**直接丢掉，
+    免得页面上多出一个没有内容的目录组。
+    """
     if not config:
         return []
     count = _safe_int(config.get("rule_count"), default=0)
     count = max(0, min(count, MAX_RULES))
+    highest = -1
+    for key in config:
+        hit = re.match(r"r(\d+)_", str(key))
+        if hit:
+            highest = max(highest, int(hit.group(1)))
+    count = max(count, min(highest + 1, MAX_RULES))
     rules: List[SyncRule] = []
     for index in range(count):
         payload = {
@@ -304,6 +332,10 @@ def parse_rules(config: Optional[Dict[str, Any]]) -> List[SyncRule]:
             if rule_key(index, item.name) in config
         }
         rules.append(SyncRule.from_dict(payload))
+    saved = max(0, min(_safe_int(config.get("rule_count"), default=0), MAX_RULES))
+    # 超出已保存组数的槽位只有在真的填了内容时才成为新组，空槽位直接丢掉
+    while len(rules) > saved and is_blank_rule(rules[-1]):
+        rules.pop()
     return rules
 
 
@@ -325,12 +357,49 @@ def organize_key(index: int, field_name: str) -> str:
     return f"{ORGANIZE_KEY_PREFIX}{index}_{field_name}"
 
 
+def organize_field_names() -> List[str]:
+    """整理组的全部字段名（配置键后缀），供配置页生成复制脚本。"""
+    return [item.name for item in dataclasses.fields(OrganizeRule)]
+
+
+def mirror_field_names() -> List[str]:
+    """镜像组的全部字段名（配置键后缀），供配置页生成复制脚本。"""
+    return [item.name for item in dataclasses.fields(MirrorRule)]
+
+
+def is_blank_organize_rule(rule: OrganizeRule) -> bool:
+    """整理组是否完全空白（配置页复制槽位没用上时会留下空键）。"""
+    return not any(
+        str(getattr(rule, name, "") or "").strip() for name in ("name", "src", "dst")
+    )
+
+
+def is_blank_mirror_rule(rule: MirrorRule) -> bool:
+    """镜像组是否完全空白。"""
+    return not any(
+        str(getattr(rule, name, "") or "").strip()
+        for name in ("name", "path1", "path2", "path3")
+    )
+
+
+def _high_key_index(config: Dict[str, Any], prefix: str) -> int:
+    """配置里实际出现的最大组下标（复制槽位会先于 count 出现）。"""
+    highest = -1
+    for key in config:
+        hit = re.match(rf"{prefix}(\d+)_", str(key))
+        if hit:
+            highest = max(highest, int(hit.group(1)))
+    return highest
+
+
 def parse_organize_rules(config: Optional[Dict[str, Any]]) -> List[OrganizeRule]:
     """从插件配置中解析全部整理组，保持顺序与占位空组。"""
     if not config:
         return []
-    count = _safe_int(config.get("organize_count"), default=0)
-    count = max(0, min(count, MAX_ORGANIZE_RULES))
+    saved = _safe_int(config.get("organize_count"), default=0)
+    saved = max(0, min(saved, MAX_ORGANIZE_RULES))
+    # 配置页「复制这一组」会把内容写进新槽位，这些键先于 organize_count 出现，按实际键补足
+    count = max(saved, min(_high_key_index(config, ORGANIZE_KEY_PREFIX) + 1, MAX_ORGANIZE_RULES))
     rules: List[OrganizeRule] = []
     for index in range(count):
         payload = {
@@ -339,6 +408,9 @@ def parse_organize_rules(config: Optional[Dict[str, Any]]) -> List[OrganizeRule]
             if organize_key(index, item.name) in config
         }
         rules.append(OrganizeRule.from_dict(payload))
+    # 超出已保存组数的槽位只有在真填了内容时才成为新组
+    while len(rules) > saved and is_blank_organize_rule(rules[-1]):
+        rules.pop()
     return rules
 
 
@@ -373,8 +445,9 @@ def parse_mirror_rules(config: Optional[Dict[str, Any]]) -> List[MirrorRule]:
     """从插件配置中解析全部镜像组，保持顺序与占位空组。"""
     if not config:
         return []
-    count = _safe_int(config.get("mirror_count"), default=0)
-    count = max(0, min(count, MAX_MIRROR_RULES))
+    saved = _safe_int(config.get("mirror_count"), default=0)
+    saved = max(0, min(saved, MAX_MIRROR_RULES))
+    count = max(saved, min(_high_key_index(config, MIRROR_KEY_PREFIX) + 1, MAX_MIRROR_RULES))
     rules: List[MirrorRule] = []
     for index in range(count):
         payload = {
@@ -383,6 +456,8 @@ def parse_mirror_rules(config: Optional[Dict[str, Any]]) -> List[MirrorRule]:
             if mirror_key(index, item.name) in config
         }
         rules.append(MirrorRule.from_dict(payload))
+    while len(rules) > saved and is_blank_mirror_rule(rules[-1]):
+        rules.pop()
     return rules
 
 
@@ -409,6 +484,20 @@ def parse_mirror_globals(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# 详情页通知合并显示：可选的合并时间窗（秒）与默认值
+NOTIFY_MERGE_WINDOWS = (10, 30, 60, 300)
+DEFAULT_NOTIFY_MERGE_SECONDS = 30
+
+
+def pick_merge_window(value: Any) -> int:
+    """合并时间窗：只接受 10/30/60/300，其它值（含空）回落到默认 30 秒。"""
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_NOTIFY_MERGE_SECONDS
+    return number if number in NOTIFY_MERGE_WINDOWS else DEFAULT_NOTIFY_MERGE_SECONDS
+
+
 def parse_globals(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """解析全局设置（连接、去抖、定时扫描等）。"""
     config = config or {}
@@ -422,6 +511,9 @@ def parse_globals(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "cd2_enabled2": bool(config.get("cd2_enabled2", True)),
         "notify_only_matched": bool(config.get("notify_only_matched", False)),
         "notify": bool(config.get("notify")),
+        # 通知合并显示：同目录 + 同类型的相邻通知合成一条可展开的聚合行（纯展示层）
+        "notify_merge": bool(config.get("notify_merge", True)),
+        "notify_merge_seconds": pick_merge_window(config.get("notify_merge_seconds")),
         "debounce_seconds": max(0, min(_safe_int(config.get("debounce_seconds"), default=5), 600)),
         "merge_seconds": max(0, min(_safe_int(config.get("merge_seconds"), default=2), 60)),
         "global_schedule_enabled": bool(config.get("global_schedule_enabled")),
@@ -459,6 +551,8 @@ def default_config() -> Dict[str, Any]:
         "cd2_enabled2": True,
         "notify_only_matched": False,
         "notify": True,
+        "notify_merge": True,
+        "notify_merge_seconds": 30,
         "debounce_seconds": 5,
         "merge_seconds": 2,
         "global_schedule_enabled": False,
@@ -470,10 +564,12 @@ def default_config() -> Dict[str, Any]:
         "organize_enabled": False,
         "organize_notify": False,
         "organize_count": 1,
+        "new_organize_slots": 0,
         "mirror_enabled": False,
         "mirror_notify": False,
         "mirror_dry_run": True,
         "mirror_count": 1,
+        "new_mirror_slots": 0,
     }
     payload.update(
         {

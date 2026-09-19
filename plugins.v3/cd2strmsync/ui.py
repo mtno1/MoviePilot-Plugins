@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .rules import (
     DEFAULT_LINK_EXTS,
+    MAX_MIRROR_RULES,
+    MAX_ORGANIZE_RULES,
     DEFAULT_METADATA_EXTS,
     DEFAULT_STRM_TEMPLATE,
     MAX_GLOBAL_EXCLUDES,
+    MAX_RULES,
     MirrorRule,
     OrganizeRule,
     SyncRule,
     has_nested_target,
+    mirror_field_names,
     mirror_key,
+    organize_field_names,
     organize_key,
+    rule_field_names,
     rule_key,
 )
 
@@ -39,6 +45,68 @@ MOUNT_TYPES = [
     {"title": "cd2", "value": "cd2"},
     {"title": "alist", "value": "alist"},
     {"title": "local", "value": "local"},
+]
+
+# 「连接状态」一行式：跟在「消息与日志」下面，不再占右侧一栏（内联样式为主）
+CONN_LINE_STYLE: Dict[str, Any] = {
+    "display": "flex",
+    "align-items": "center",
+    "flex-wrap": "wrap",
+    "gap": "6px 12px",
+    "padding": "8px 12px",
+    "margin-bottom": "10px",
+    "border": "1px solid rgba(var(--v-theme-on-surface,0,0,0),.14)",
+    "border-radius": "10px",
+    "background": "rgba(var(--v-theme-on-surface,0,0,0),.03)",
+    "font-size": "12px",
+}
+CONN_DOT_STYLE: Dict[str, Any] = {"width": "8px", "height": "8px", "border-radius": "50%", "flex": "0 0 auto"}
+CONN_SEP_STYLE: Dict[str, Any] = {
+    "width": "1px",
+    "height": "14px",
+    "background": "rgba(var(--v-theme-on-surface,0,0,0),.16)",
+}
+
+def _tint(color: str, alpha: float) -> str:
+    """把 #rrggbb 转成 rgba()，用于组头整行的淡色底（明暗主题都能用）。"""
+    value = str(color or "").lstrip("#")
+    if len(value) == 3:
+        value = "".join(ch * 2 for ch in value)
+    try:
+        red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
+    except (ValueError, IndexError):
+        return color
+    return f"rgba({red},{green},{blue},{alpha:g})"
+
+
+# 目录组的标识色：每一组一个颜色（左色条 + 序号徽章），方便一眼区分是哪一组；
+# 这组色在明暗主题下都够醒目，且不占用 green/红/橙 的"状态语义"（状态仍由徽章表达）
+GROUP_COLORS = ("#3b82f6", "#8b5cf6", "#06b6d4", "#f59e0b", "#ec4899", "#10b981", "#6366f1", "#14b8a6")
+
+# 通知合并：整组最大跨度（秒），避免把同一目录里隔了很久的操作也并成一组
+MERGE_SPAN_LIMIT = 300
+# 通知与操作记录配对时允许的时间错位（秒）：批处理里两边往往交错发生
+PAIR_SLACK = 60
+
+# 通知 / 操作记录容器：固定高度 + 垂直滚动。
+# 用内联样式而不是只靠注入 CSS —— 宿主对注入样式表的支持并不可靠（配置页一直是内联兜底），
+# 内联样式不会被任何样式表规则覆盖，滚动条一定能出来。
+FEED_BOX_STYLE: Dict[str, Any] = {
+    "max-height": "420px",
+    "overflow-y": "auto",
+    # 不要写 overscroll-behavior:contain —— 那会拦住滚动接力：
+    # 光标停在框里、框滚到底后整页就再也滚不动（用户实测"鼠标在左侧无法滚动窗口"）
+    "padding": "4px 8px",
+    "border": "1px solid rgba(var(--v-theme-on-surface,0,0,0),.10)",
+    "border-radius": "8px",
+}
+
+# 合并时间窗的可选值（与 rules.NOTIFY_MERGE_WINDOWS 保持一致）
+MERGE_WINDOW_ITEMS = [
+    {"title": "10 秒", "value": "10"},
+    {"title": "30 秒（默认）", "value": "30"},
+    {"title": "60 秒", "value": "60"},
+    {"title": "300 秒", "value": "300"},
 ]
 
 
@@ -173,6 +241,81 @@ border-radius:6px;padding:0 8px;cursor:pointer}
 .cd2strm-page .cd2strm-tr.ign{grid-template-columns:max-content max-content minmax(0,1fr) minmax(0,1fr) max-content}
 .cd2strm-page .cd2strm-tr.mir{grid-template-columns:max-content max-content max-content minmax(0,1fr) minmax(0,0.9fr)}
 }
+/* ===== C 布局（活动流 + 常驻侧栏）：只新增类名，不改动配置页与整理/镜像视图既有类 ===== */
+.cd2strm-page .cd2strm-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;
+background:rgba(var(--v-theme-on-surface,0,0,0),.30)}
+.cd2strm-page .cd2strm-dot.ok{background:rgb(var(--v-theme-success,46,125,50))}
+.cd2strm-page .cd2strm-dot.bad{background:rgb(var(--v-theme-error,198,40,40))}
+.cd2strm-page .cd2strm-scard code{font-family:ui-monospace,Menlo,Consolas,monospace;
+font-size:11px;padding:1px 6px;border-radius:6px;background:rgba(var(--v-theme-on-surface,0,0,0),.07)}
+.cd2strm-page .cd2strm-main{min-width:0}
+.cd2strm-page .cd2strm-adr{display:inline-flex;align-items:center;gap:6px}
+/* 活动流：时间线行（时间 / 轴 / 内容） */
+.cd2strm-page .cd2strm-fsec{border-top:1px solid rgba(var(--v-theme-on-surface,0,0,0),.10);margin-top:10px;padding-top:7px}
+.cd2strm-page .cd2strm-fhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
+.cd2strm-page .cd2strm-fh{font-size:12.5px;font-weight:600;opacity:.85}
+.cd2strm-page .cd2strm-feed{padding-top:2px}
+.cd2strm-page .cd2strm-fi{display:grid;grid-template-columns:82px 12px minmax(0,1fr);gap:8px;padding:5px 0}
+.cd2strm-page .cd2strm-fi .tm{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;opacity:.55;
+padding-top:2px;white-space:nowrap}
+.cd2strm-page .cd2strm-fi .rail{position:relative;display:flex;justify-content:center}
+.cd2strm-page .cd2strm-fi .rail .dot{width:8px;height:8px;border-radius:50%;margin-top:5px;
+background:rgb(var(--v-theme-primary,103,80,164))}
+.cd2strm-page .cd2strm-fi .rail::before{content:"";position:absolute;top:14px;bottom:-7px;width:1px;
+background:rgba(var(--v-theme-on-surface,0,0,0),.13)}
+.cd2strm-page .cd2strm-fi:last-child .rail::before{display:none}
+.cd2strm-page .cd2strm-fi.ok .rail .dot{background:rgb(var(--v-theme-success,46,125,50))}
+.cd2strm-page .cd2strm-fi.bad .rail .dot{background:rgb(var(--v-theme-error,198,40,40))}
+.cd2strm-page .cd2strm-fi.skip .rail .dot{background:rgba(var(--v-theme-on-surface,0,0,0),.30)}
+.cd2strm-page .cd2strm-fi.run .rail .dot{background:rgb(var(--v-theme-warning,237,108,2))}
+.cd2strm-page .cd2strm-fi .bd{min-width:0}
+.cd2strm-page .cd2strm-fi .top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.cd2strm-page .cd2strm-fi .nm{font-size:13px;font-weight:600;min-width:0;max-width:100%;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cd2strm-page .cd2strm-fi .dr{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;opacity:.5;
+margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cd2strm-page .cd2strm-fi .mt{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px;font-size:11.5px}
+.cd2strm-page .cd2strm-fi .files{margin-top:1px}
+@media (max-width:1000px){
+.cd2strm-page .cd2strm-fi{grid-template-columns:66px 12px minmax(0,1fr)}
+}
+/* ===== 通知合并（方案 A）：同目录 + 同类型的相邻通知折叠成一条聚合行 ===== */
+.cd2strm-page details.cd2strm-gwrap{margin:2px 0}
+.cd2strm-page details.cd2strm-gwrap>summary{list-style:none;cursor:pointer;display:grid;
+grid-template-columns:82px 12px minmax(0,1fr);gap:8px;padding:5px 0}
+.cd2strm-page details.cd2strm-gwrap>summary::-webkit-details-marker{display:none}
+.cd2strm-page details.cd2strm-gwrap>summary .tm{font-family:ui-monospace,Menlo,Consolas,monospace;
+font-size:11px;opacity:.55;padding-top:2px;white-space:nowrap}
+.cd2strm-page details.cd2strm-gwrap>summary .rail{position:relative;display:flex;justify-content:center}
+.cd2strm-page details.cd2strm-gwrap>summary .rail .dot{width:9px;height:9px;border-radius:3px;
+margin-top:5px;background:rgb(var(--v-theme-warning,237,108,2))}
+.cd2strm-page details.cd2strm-gwrap>summary .rail::before{content:"";position:absolute;top:14px;bottom:-7px;
+width:1px;background:rgba(var(--v-theme-on-surface,0,0,0),.13)}
+.cd2strm-page details.cd2strm-gwrap:last-child>summary .rail::before{display:none}
+.cd2strm-page .cd2strm-gsum{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.cd2strm-page .cd2strm-gsum .nm{font-size:13px;font-weight:600;min-width:0;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cd2strm-page .cd2strm-gsum .cnt{font-size:12px;opacity:.75;white-space:nowrap}
+/* 展开/收起提示挂在 .mt 里（不是 .cd2strm-gsum）：按 details[open] 切换，只显示一个 */
+.cd2strm-page details.cd2strm-gwrap>summary .chev{margin-left:auto;font-size:10.5px;opacity:.55;
+white-space:nowrap}
+.cd2strm-page details.cd2strm-gwrap>summary .cd2strm-gopen{display:none}
+.cd2strm-page details.cd2strm-gwrap[open]>summary .cd2strm-gopen{display:inline}
+.cd2strm-page details.cd2strm-gwrap[open]>summary .cd2strm-gclosed{display:none}
+.cd2strm-page details.cd2strm-gwrap .cd2strm-gdet{margin:2px 0 6px 102px;padding-left:10px;
+border-left:1px dashed rgba(var(--v-theme-on-surface,0,0,0),.16)}
+.cd2strm-page details.cd2strm-gwrap .cd2strm-gdet .cd2strm-fi{padding:4px 0}
+/* 通知与操作记录：固定高度 + 垂直滚动条（内联样式为主，这里是增强）*/
+.cd2strm-page .cd2strm-fsec .cd2strm-feed{max-height:420px;overflow-y:auto;
+padding-right:4px;scrollbar-width:thin}
+.cd2strm-page .cd2strm-fsec .cd2strm-feed::-webkit-scrollbar{width:8px}
+.cd2strm-page .cd2strm-fsec .cd2strm-feed::-webkit-scrollbar-thumb{
+background:rgba(var(--v-theme-on-surface,0,0,0),.22);border-radius:4px}
+.cd2strm-page .cd2strm-fsec .cd2strm-feed::-webkit-scrollbar-track{
+background:rgba(var(--v-theme-on-surface,0,0,0),.05);border-radius:4px}
+/* 通知 ↔ 操作记录 的对应提示 */
+.cd2strm-page .cd2strm-link{font-size:11.5px;color:rgb(var(--v-theme-primary,103,80,164));opacity:.9;
+font-family:ui-monospace,Menlo,Consolas,monospace;white-space:nowrap}
 """
 
 
@@ -190,6 +333,8 @@ FIELD_TIPS: Dict[str, str] = {
     "g-global_schedule_hours": "自动扫描的间隔小时数（1～168）",
     "g-notify": "是否推送通知到 MoviePilot 已配置的消息渠道",
     "g-notify_only_matched": "开启后详情页隐藏「未匹配」通知卡片与相关计数",
+    "g-notify_merge": "详情页把「同一目录 + 同类型」且在时间窗内的连续通知折叠成一条可展开的聚合行，只影响显示，数据仍逐条保存",
+    "g-notify_merge_seconds": "相邻两条通知间隔超过这个秒数就不再合并；整组跨度最多 300 秒，含失败或待回填的组默认展开",
     # STRM 同步：目录
     "r-media_dir": "CD2 通知里落在这个目录（含子目录）的变更才会被本组处理；填容器内路径，例如 /mnt/cd2-mount/115/media/电视剧/国产剧",
     "r-local_dir": "strm / 软链接生成到这里，目录结构按源目录的相对路径镜像；建议放在挂载之外的盘上",
@@ -334,6 +479,17 @@ color:rgb(var(--v-theme-primary,103,80,164));opacity:1}
 @media (max-width:900px){
 .cd2strm-form .cd2strm-frow{grid-template-columns:108px minmax(0,1fr);gap:8px}
 }
+/* 目录组下方的「复制这一组」与新建槽位 */
+.cd2strm-form .cd2strm-copy-row{display:flex;align-items:center;gap:8px;padding:6px 10px 8px;
+border-top:1px dashed rgba(var(--v-theme-on-surface,0,0,0),.12)}
+.cd2strm-form .cd2strm-copy-hint{font-size:11.5px;opacity:.6;min-width:0}
+.cd2strm-form .cd2strm-copy-btn{display:inline-flex;align-items:center;flex:0 0 auto;font-size:12.5px;
+line-height:24px;padding:0 12px;border-radius:999px;cursor:pointer;
+border:1px solid rgba(var(--v-theme-primary,103,80,164),.35);
+color:rgb(var(--v-theme-primary,103,80,164));background:rgba(var(--v-theme-primary,103,80,164),.08)}
+.cd2strm-form .cd2strm-new-fold{border-style:dashed}
+.cd2strm-form .cd2strm-new-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+padding:7px 12px;background:rgba(var(--v-theme-on-surface,0,0,0),.03);border-radius:9px 9px 0 0}
 """ + _field_tip_css()
 
 # 配置页样式（基础规则 + 每个字段的说明浮层）
@@ -792,16 +948,17 @@ def _header_switch(model: str) -> Dict[str, Any]:
 
 
 def _form_card(title: str, content: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """配置页的一张卡片：标题栏（色条 + 标题）与卡片内容。"""
+    """配置页的一张卡片：标题栏（色条 + 标题）与卡片内容；外框与色条按卡片主题取色。"""
+    accent = FORM_CARD_COLORS.get(title, "#3b82f6")
     return {
         "component": "div",
-        "props": {"class": "cd2strm-card"},
+        "props": {"class": "cd2strm-card", "style": _accent_border(accent, "1.5px", 0.6)},
         "content": [
             {
                 "component": "div",
                 "props": {"class": "cd2strm-chead"},
                 "content": [
-                    {"component": "span", "props": {"class": "cd2strm-stripe"}},
+                    {"component": "span", "props": {"class": "cd2strm-stripe", "style": {"background": accent}}},
                     {"component": "span", "text": title},
                 ],
             },
@@ -959,13 +1116,29 @@ def build_form(
         _run_card(),
     ]
     for index, rule in enumerate(rules):
-        sync_content.append(_rule_fold(index, rule))
+        copy_target = len(rules) if len(rules) < MAX_RULES else None
+        if index:
+            # 展开后组与组之间用上一组的颜色画一条横线
+            sync_content.append(_group_divider(index - 1))
+        sync_content.append(_rule_fold(index, rule, copy_target))
+    if len(rules) < MAX_RULES:
+        sync_content.append(_new_rule_fold(len(rules)))
     organize_content: List[Dict[str, Any]] = [_organize_card()]
     for index, rule in enumerate(organize_rules):
-        organize_content.append(_organize_group_fold(index, rule))
+        if index:
+            organize_content.append(_group_divider(index - 1))
+        copy_target = len(organize_rules) if len(organize_rules) < MAX_ORGANIZE_RULES else None
+        organize_content.append(_organize_group_fold(index, rule, copy_target))
+    if len(organize_rules) < MAX_ORGANIZE_RULES:
+        organize_content.append(_new_organize_fold(len(organize_rules)))
     mirror_content: List[Dict[str, Any]] = [_mirror_card()]
     for index, rule in enumerate(mirror_rules):
-        mirror_content.append(_mirror_group_fold(index, rule))
+        if index:
+            mirror_content.append(_group_divider(index - 1))
+        copy_target = len(mirror_rules) if len(mirror_rules) < MAX_MIRROR_RULES else None
+        mirror_content.append(_mirror_group_fold(index, rule, copy_target))
+    if len(mirror_rules) < MAX_MIRROR_RULES:
+        mirror_content.append(_new_mirror_fold(len(mirror_rules)))
     content: List[Dict[str, Any]] = [
         _form_style_block(),
         _config_view_toggle(),
@@ -1015,7 +1188,7 @@ def _connection_card(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _run_card() -> Dict[str, Any]:
-    """通知卡片（只保留通知开关）。"""
+    """通知卡片（通知开关 + 详情页通知合并显示）。"""
     return _form_card(
         "通知",
         [
@@ -1025,7 +1198,19 @@ def _run_card() -> Dict[str, Any]:
                     _switch("notify", "发送通知", "g-notify"),
                     _switch("notify_only_matched", "详情页只显示命中通知", "g-notify_only_matched"),
                 ],
-            )
+            ),
+            _form_section(
+                "详情页通知显示",
+                [
+                    _switch("notify_merge", "合并相邻通知", "g-notify_merge"),
+                    _select(
+                        "notify_merge_seconds",
+                        "合并时间窗",
+                        MERGE_WINDOW_ITEMS,
+                        "g-notify_merge_seconds",
+                    ),
+                ],
+            ),
         ],
     )
 
@@ -1054,15 +1239,265 @@ def _schedule_card() -> Dict[str, Any]:
     )
 
 
-def _rule_fold(index: int, rule: SyncRule) -> Dict[str, Any]:
-    """把单个目录组包成可独立折叠的区块：默认全部折叠，点开才显示设置项。"""
+def _copy_button(
+    prefix: str, fields: List[str], source_index: int, target_index: int, slot_flag: str
+) -> Dict[str, Any]:
+    """通用的「复制这一组」按钮：把本组全部字段写进下方的新建槽位。
+
+    纯前端赋值（与全局排除目录的「＋」同一套机制）：不调用接口、不改已保存的配置，
+    用户检查完再按保存，才会真正多出一组。prefix 是键前缀（r / o / d）。
+    """
+    assignments = "; ".join(
+        f"{prefix}{target_index}_{name} = {prefix}{source_index}_{name}" for name in fields
+    )
+    show_slot = (
+        f"{slot_flag} = Math.max("
+        f"(typeof {slot_flag} === 'undefined' ? 0 : {slot_flag}), 1)"
+    )
     return {
-        "component": "details",
-        "props": {"class": "cd2strm-rule-fold"},
+        "component": "span",
+        "props": {
+            "class": "cd2strm-copy-btn",
+            "title": "把这一组的全部设置复制到下方「新建目录组」，保存后生效",
+            "onClick": f"(event) => {{ {assignments}; {show_slot}; }}",
+        },
+        "text": "复制这一组",
+    }
+
+
+def _rule_copy_button(source_index: int, target_index: int) -> Dict[str, Any]:
+    """STRM 目录组的「复制这一组」（键前缀 r）。"""
+    return _copy_button("r", rule_field_names(), source_index, target_index, "new_rule_slots")
+
+
+def _organize_copy_row(index: int, target_index: int) -> Dict[str, Any]:
+    """整理组的「复制这一组」（键前缀 o）。"""
+    return _group_copy_row("o", organize_field_names(), index, target_index, "new_organize_slots")
+
+
+def _mirror_copy_row(index: int, target_index: int) -> Dict[str, Any]:
+    """镜像组的「复制这一组」（键前缀 d）。"""
+    return _group_copy_row("d", mirror_field_names(), index, target_index, "new_mirror_slots")
+
+
+def _group_copy_row(
+    prefix: str,
+    fields: List[str],
+    source_index: int,
+    target_index: int,
+    slot_flag: str,
+    hint: str = "要再建一组同样的？",
+) -> Dict[str, Any]:
+    """组卡片下方的复制入口（配置页专用）。"""
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-copy-row"},
         "content": [
-            _rule_summary(index, rule),
+            {"component": "span", "props": {"class": "cd2strm-copy-hint"}, "text": hint},
+            _copy_button(prefix, fields, source_index, target_index, slot_flag),
+        ],
+    }
+
+
+def _new_group_fold(
+    *,
+    title: str,
+    index: int,
+    prefix: str,
+    fields: List[str],
+    slot_flag: str,
+    body: Dict[str, Any],
+    hint: str,
+) -> Dict[str, Any]:
+    """通用的「新建槽位」：默认隐藏，点任意一组的「复制这一组」后才出现。"""
+    guard = f"(typeof {slot_flag} === 'undefined' ? 0 : {slot_flag})"
+    clear = "; ".join(f"{prefix}{index}_{name} = ''" for name in fields) + f"; {slot_flag} = 0"
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-rule-fold cd2strm-new-fold", "show": f"{guard} >= 1"},
+        "content": [
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-new-head"},
+                "content": [
+                    {"component": "span", "props": {"class": "cd2strm-rname"}, "text": title},
+                    _chip("保存后生效", "primary"),
+                    {"component": "span", "props": {"class": "cd2strm-copy-hint"}, "text": hint},
+                    {"component": "span", "props": {"class": "cd2strm-sp"}},
+                    {
+                        "component": "span",
+                        "props": {
+                            "class": "cd2strm-copy-btn",
+                            "title": "清空这个槽位（不保存就不会创建）",
+                            "onClick": f"(event) => {{ {clear}; }}",
+                        },
+                        "text": "清空槽位",
+                    },
+                ],
+            },
+            body,
+        ],
+    }
+
+
+def _new_organize_fold(index: int) -> Dict[str, Any]:
+    """整理页的新建槽位。"""
+    return _new_group_fold(
+        title="新建整理组",
+        index=index,
+        prefix="o",
+        fields=organize_field_names(),
+        slot_flag="new_organize_slots",
+        body=_organize_body(index),
+        hint="上面任意一组点「复制这一组」会把内容填到这里；留空则不会被创建",
+    )
+
+
+def _new_mirror_fold(index: int) -> Dict[str, Any]:
+    """镜像页的新建槽位。"""
+    return _new_group_fold(
+        title="新建镜像组",
+        index=index,
+        prefix="d",
+        fields=mirror_field_names(),
+        slot_flag="new_mirror_slots",
+        body=_mirror_body(index),
+        hint="上面任意一组点「复制这一组」会把内容填到这里；留空则不会被创建",
+    )
+
+
+def _rule_copy_row(index: int, target_index: int) -> Dict[str, Any]:
+    """目录组下方的复制入口（配置页专用）。"""
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-copy-row"},
+        "content": [
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-copy-hint"},
+                "text": "要再建一组同样的？",
+            },
+            _rule_copy_button(index, target_index),
+        ],
+    }
+
+
+def _new_rule_fold(index: int) -> Dict[str, Any]:
+    """配置页的新建槽位：默认隐藏，点任意一组的「复制这一组」后才出现。"""
+    guard = "(typeof new_rule_slots === 'undefined' ? 0 : new_rule_slots)"
+    clear = (
+        "; ".join(f"r{index}_{name} = ''" for name in rule_field_names())
+        + "; new_rule_slots = 0"
+    )
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-rule-fold cd2strm-new-fold", "show": f"{guard} >= 1"},
+        "content": [
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-new-head"},
+                "content": [
+                    {"component": "span", "props": {"class": "cd2strm-rname"}, "text": "新建目录组"},
+                    _chip("保存后生效", "primary"),
+                    {
+                        "component": "span",
+                        "props": {"class": "cd2strm-copy-hint"},
+                        "text": "上面任意一组点「复制这一组」会把内容填到这里；留空则不会被创建",
+                    },
+                    {"component": "span", "props": {"class": "cd2strm-sp"}},
+                    {
+                        "component": "span",
+                        "props": {
+                            "class": "cd2strm-copy-btn",
+                            "title": "清空这个槽位（不保存就不会创建）",
+                            "onClick": f"(event) => {{ {clear}; }}",
+                        },
+                        "text": "清空槽位",
+                    },
+                ],
+            },
             _rule_card(index),
         ],
+    }
+
+
+def _rule_fold(index: int, rule: SyncRule, copy_target: Optional[int] = None) -> Dict[str, Any]:
+    """把单个目录组包成可独立折叠的区块：默认全部折叠，点开才显示设置项。"""
+    body: List[Dict[str, Any]] = [_rule_card(index)]
+    if copy_target is not None:
+        body.append(_rule_copy_row(index, copy_target))
+    return {
+        "component": "details",
+        "props": {
+            "class": "cd2strm-rule-fold",
+            "style": _accent_border(_group_accent(index), "1.5px", 0.6),
+        },
+        "content": [
+            _rule_summary(index, rule),
+            *body,
+        ],
+    }
+
+
+# 各区块外框的配色：不同区块不同颜色（目录组用组标识色）。rgba 直接算好写死，
+# 避免在模块顶部调用后面才定义的 _tint()。
+BLOCK_BORDERS: Dict[str, Dict[str, Any]] = {
+    "conn": {"border": "1px solid rgba(14,165,233,.55)"},    # 连接状态 / 状态行（青）
+    "others": {"border": "1px solid rgba(139,92,246,.55)"},  # 未匹配卡片（紫）
+    # 说明：记录区 / CD2 通知区这两个「组内框」按用户要求不再着色（2026-09-20），
+    # 它们仍各自有中性色的内层滚动框做分区。
+}
+# 配置页各卡片的配色（按调用顺序取用）
+FORM_CARD_COLORS: Dict[str, str] = {
+    "启用插件": "#10b981",
+    "连接与地址": "#0ea5e9",
+    "通知": "#f59e0b",
+    "定时扫描": "#06b6d4",
+    "全局排除目录": "#8b5cf6",
+    "媒体整理": "#3b82f6",
+    "镜像移动": "#ec4899",
+}
+
+
+def _accent_border(color: str, width: str = "1px", alpha: float = 0.55) -> Dict[str, Any]:
+    """按标识色给区块外框上色（内联样式，宿主一定生效）。"""
+    return {"border": f"{width} solid {_tint(color, alpha)}"}
+
+
+def _group_accent(index: int) -> str:
+    """目录组的标识色（与详情页同一套调色板）。"""
+    return GROUP_COLORS[index % len(GROUP_COLORS)]
+
+
+def _group_summary_style(index: int) -> Dict[str, Any]:
+    """折叠头的整行淡底（标识色 18%）。"""
+    return {"background": _tint(_group_accent(index), 0.18)}
+
+
+def _group_divider(index: int) -> Dict[str, Any]:
+    """组与组之间的彩色横线（用上一组的标识色），展开后一眼看出分界。"""
+    return {
+        "component": "div",
+        "props": {
+            "class": "cd2strm-rule-divider",
+            "style": {
+                "height": "3px",
+                "border-radius": "2px",
+                "background": _group_accent(index),
+                "opacity": "0.55",
+                "margin": "12px 0 4px",
+            },
+        },
+        # 带一个隐藏子节点：某些渲染器会跳过没有 content 的节点，这里做个保险
+        "content": [{"component": "span", "props": {"style": {"display": "none"}}}],
+    }
+
+
+def _stripe_node(index: int) -> Dict[str, Any]:
+    """折叠头左侧的标识色竖条。"""
+    return {
+        "component": "span",
+        "props": {"class": "cd2strm-stripe", "style": {"background": _group_accent(index), "width": "5px"}},
     }
 
 
@@ -1084,8 +1519,9 @@ def _rule_summary(index: int, rule: SyncRule) -> Dict[str, Any]:
     ]
     return {
         "component": "summary",
-        "props": {"class": "cd2strm-rule-summary"},
+        "props": {"class": "cd2strm-rule-summary", "style": _group_summary_style(index)},
         "content": [
+            _stripe_node(index),
             {
                 "component": "div",
                 "props": {"class": "cd2strm-rmeta"},
@@ -1346,8 +1782,9 @@ def _organize_summary(index: int, rule: OrganizeRule) -> Dict[str, Any]:
     ]
     return {
         "component": "summary",
-        "props": {"class": "cd2strm-rule-summary"},
+        "props": {"class": "cd2strm-rule-summary", "style": _group_summary_style(index)},
         "content": [
+            _stripe_node(index),
             {
                 "component": "div",
                 "props": {"class": "cd2strm-rmeta"},
@@ -1413,12 +1850,17 @@ def _organize_body(index: int) -> Dict[str, Any]:
     }
 
 
-def _organize_group_fold(index: int, rule: OrganizeRule) -> Dict[str, Any]:
-    """一个整理组的可折叠区块（默认折叠，与 STRM 目录组一致）。"""
+def _organize_group_fold(
+    index: int, rule: OrganizeRule, copy_target: Optional[int] = None
+) -> Dict[str, Any]:
+    """一个整理组的可折叠区块（默认折叠）；copy_target 有值时在下方给出复制入口。"""
+    body: List[Dict[str, Any]] = [_organize_body(index)]
+    if copy_target is not None:
+        body.append(_organize_copy_row(index, copy_target))
     return {
         "component": "details",
-        "props": {"class": "cd2strm-rule-fold"},
-        "content": [_organize_summary(index, rule), _organize_body(index)],
+        "props": {"class": "cd2strm-rule-fold", "style": _accent_border(_group_accent(index), "1.5px", 0.6)},
+        "content": [_organize_summary(index, rule), *body],
     }
 
 
@@ -1457,8 +1899,9 @@ def _mirror_summary(index: int, rule: MirrorRule) -> Dict[str, Any]:
     ]
     return {
         "component": "summary",
-        "props": {"class": "cd2strm-rule-summary"},
+        "props": {"class": "cd2strm-rule-summary", "style": _group_summary_style(index)},
         "content": [
+            _stripe_node(index),
             {
                 "component": "div",
                 "props": {"class": "cd2strm-rmeta"},
@@ -1542,12 +1985,17 @@ def _mirror_body(index: int) -> Dict[str, Any]:
     }
 
 
-def _mirror_group_fold(index: int, rule: MirrorRule) -> Dict[str, Any]:
-    """一个镜像组的可折叠区块（默认折叠，与其它路径组一致）。"""
+def _mirror_group_fold(
+    index: int, rule: MirrorRule, copy_target: Optional[int] = None
+) -> Dict[str, Any]:
+    """一个镜像组的可折叠区块（默认折叠）；copy_target 有值时在下方给出复制入口。"""
+    body: List[Dict[str, Any]] = [_mirror_body(index)]
+    if copy_target is not None:
+        body.append(_mirror_copy_row(index, copy_target))
     return {
         "component": "details",
-        "props": {"class": "cd2strm-rule-fold"},
-        "content": [_mirror_summary(index, rule), _mirror_body(index)],
+        "props": {"class": "cd2strm-rule-fold", "style": _accent_border(_group_accent(index), "1.5px", 0.6)},
+        "content": [_mirror_summary(index, rule), *body],
     }
 
 
@@ -1577,6 +2025,9 @@ def build_page(
     顶部是视图菜单（STRM 同步 / 媒体整理 / 镜像移动），各视图渲染自己的状态与分组，
     数据互不影响；切换通过插件接口写入当前视图后整页重载。
     """
+    # 三个视图共用：每页条数（合并后按组翻页）与合并窗口（display 由 get_page 写入）
+    page_size = max(5, int(display.get("page_size") or 5))
+    merge_seconds = max(0, int(display.get("merge_seconds") or 0))
     organize_rules = organize_rules or []
     organize_records = organize_records or []
     mirror_rules = mirror_rules or []
@@ -1584,7 +2035,7 @@ def build_page(
     if view == "mirror":
         mirror_page: List[Dict[str, Any]] = [
             _page_menu(plugin_id, api_token, "mirror"),
-            _mirror_status_card(plugin_id, api_token, mirror_status or {}, len(mirror_rules)),
+            _mirror_status_line(mirror_status or {}, len(mirror_rules)),
         ]
         for index, rule in enumerate(mirror_rules):
             mirror_page.append(
@@ -1600,6 +2051,8 @@ def build_page(
                         for item in ((mirror_status or {}).get("events") or [])
                         if item.get("rule_index") == index
                     ],
+
+                    merge_seconds,
                 )
             )
         mirror_page.append(_style_block())
@@ -1608,7 +2061,7 @@ def build_page(
     if view == "organize":
         page: List[Dict[str, Any]] = [
             _page_menu(plugin_id, api_token, "organize"),
-            _organize_status_card(plugin_id, api_token, organize_status or {}, len(organize_rules)),
+            _organize_status_line(organize_status or {}, len(organize_rules)),
         ]
         for index, rule in enumerate(organize_rules):
             page.append(
@@ -1624,18 +2077,17 @@ def build_page(
                         for item in ((organize_status or {}).get("events") or [])
                         if item.get("rule_index") == index
                     ],
+
+                    merge_seconds,
                 )
             )
         page.append(_organize_ignored_card((organize_status or {}).get("ignored") or []))
         page.append(_style_block())
         return [{"component": "div", "props": {"class": "cd2strm-page"}, "content": page}]
-    page_size = max(5, int(display.get("page_size") or 5))
     pages = display.get("pages") or {}
     progress = progress or {}
-    page: List[Dict[str, Any]] = [
-        _page_menu(plugin_id, api_token, "sync"),
-        _status_card(plugin_id, api_token, status),
-    ]
+    # 左栏：各目录组的活动流（通知 + 操作记录）；右栏：常驻的运行状态与目录组导览
+    blocks: List[Dict[str, Any]] = []
     for index, rule in enumerate(rules):
         key = str(index)
         rule_name = rule.display_name(index)
@@ -1646,7 +2098,7 @@ def build_page(
             if item.get("rule_index") == index
             or (item.get("rule_index") is None and item.get("rule") == rule_name)
         ]
-        page.append(
+        blocks.append(
             _rule_group_card(
                 plugin_id,
                 api_token,
@@ -1658,10 +2110,11 @@ def build_page(
                 int(pages.get(key) or 1),
                 page_size,
                 progress.get(key),
+                merge_seconds,
             )
         )
     if others:
-        page.append(
+        blocks.append(
             _unmatched_card(
                 plugin_id,
                 api_token,
@@ -1672,6 +2125,11 @@ def build_page(
                 excluded_count,
             )
         )
+    page: List[Dict[str, Any]] = [
+        _page_menu(plugin_id, api_token, "sync"),
+        _connection_line(status),
+        {"component": "div", "props": {"class": "cd2strm-main"}, "content": blocks},
+    ]
     # 整页包在前缀容器内，并注入受控样式
     page.append(_style_block())
     return [{"component": "div", "props": {"class": "cd2strm-page"}, "content": page}]
@@ -1775,81 +2233,6 @@ def _page_menu(plugin_id: str, api_token: str, view: str) -> Dict[str, Any]:
     return {"component": "div", "props": {"class": "cd2strm-top"}, "content": [menu, msglog]}
 
 
-def _organize_status_card(
-    plugin_id: str,
-    api_token: str,
-    status: Dict[str, Any],
-    group_count: int,
-) -> Dict[str, Any]:
-    """媒体整理的运行状态面板（与 STRM 同步的状态面板同构）。"""
-    enabled = bool(status.get("organize_enabled"))
-    tone = "" if enabled else "warn"
-    state_text = "已启用" if enabled else "未启用"
-    state_tone = "ok" if enabled else "muted"
-    body: List[Dict[str, Any]] = [
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-kpis k4"},
-            "content": [
-                _kpi(state_text, "整理状态", tone=state_tone),
-                _kpi(str(status.get("accepted", 0)), "累计通知"),
-                _kpi(str(status.get("pending", 0)), "待整理", tone="muted"),
-                _kpi(str(status.get("running", 0)), "正在整理", tone="muted"),
-            ],
-        },
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-hint"},
-            "text": "　｜　".join(
-                [
-                    f"整理组：{group_count} 组",
-                    "通知来源：与 STRM 同步共用",
-                    "整理链：MoviePilot TransferChain",
-                    f"整理记录：{int(status.get('record_count') or 0)} 条",
-                ]
-            ),
-        },
-    ]
-    if not enabled:
-        body.append(
-            {
-                "component": "div",
-                "props": {"class": "cd2strm-alert"},
-                "content": [
-                    {"component": "span", "text": "媒体整理当前未启用：到配置页「媒体整理配置」里开启并填写整理组。"}
-                ],
-            }
-        )
-    if status.get("last_error"):
-        body.append(
-            {
-                "component": "div",
-                "props": {"class": "cd2strm-alert bad"},
-                "content": [
-                    {"component": "span", "props": {"class": "cd2strm-bad"}, "text": "最近错误"},
-                    {"component": "span", "text": str(status["last_error"])},
-                ],
-            }
-        )
-    return {
-        "component": "div",
-        "props": {"class": "cd2strm-panel"},
-        "content": [
-            {
-                "component": "div",
-                "props": {"class": "cd2strm-phead"},
-                "content": [
-                    {"component": "span", "props": {"class": f"cd2strm-stripe {tone}".strip()}},
-                    {"component": "span", "text": "运行状态"},
-                    {"component": "span", "props": {"class": "cd2strm-sp"}},
-                    # 刷新 / 清除计数 / 清空通知与记录 / 清空日志 已统一到顶部「消息与日志」区
-                ],
-            },
-            {"component": "div", "props": {"class": "cd2strm-sub"}, "content": body},
-        ],
-    }
-
-
 def _organize_ignored_card(ignored: List[Dict[str, Any]]) -> Dict[str, Any]:
     """未匹配的整理通知卡片（默认折叠）：时间 / 变更 / 路径 / 新路径 / 原因。"""
     head = {
@@ -1894,7 +2277,7 @@ def _organize_ignored_card(ignored: List[Dict[str, Any]]) -> Dict[str, Any]:
         )
     return {
         "component": "div",
-        "props": {"class": "cd2strm-panel"},
+        "props": {"class": "cd2strm-panel", "style": {**BLOCK_BORDERS["others"]}},
         "content": [
             {
                 "component": "div",
@@ -1916,10 +2299,10 @@ def _organize_ignored_card(ignored: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "content": [
                     {
                         "component": "details",
-                        "props": {"class": "cd2strm-fold"},
+                        "props": {"class": "cd2strm-fold", "style": {**BLOCK_BORDERS["others"]}},
                         "content": [
                             {"component": "summary", "text": "展开查看明细"},
-                            {"component": "div", "content": [head, *rows]},
+                            {"component": "div", "props": {"class": "cd2strm-feed", "style": dict(FEED_BOX_STYLE)}, "content": [head, *rows]},
                         ],
                     }
                 ],
@@ -1928,11 +2311,218 @@ def _organize_ignored_card(ignored: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _organize_records(
-    records: List[Dict[str, Any]], page: int = 1, page_size: int = 5
+def _record_entries(records: List[Dict[str, Any]], kind: str) -> List[Dict[str, Any]]:
+    """把整理 / 镜像记录整理成「可合并条目」：时间 + 触发 + 结果 + 目录 + 明细行。
+
+    明细行沿用两个视图原有的表格行，保证逐条内容不丢；聚合与展示交给下面几个构件。
+    """
+    entries: List[Dict[str, Any]] = []
+    for item in records:
+        if kind == "organize":
+            path = str(item.get("file") or "")
+            extra = str(item.get("media") or "")
+            node = _organize_record_node(item)
+        else:
+            path = str(item.get("path") or "")
+            extra = ""
+            node = _mirror_record_node(item)
+        directory, name = _split_path(path)
+        entries.append(
+            {
+                "time": str(item.get("time") or ""),
+                "trigger": str(item.get("trigger") or ""),
+                "result": str(item.get("result") or ""),
+                "dir": directory,
+                "name": name,
+                "extra": extra,
+                "node": node,
+            }
+        )
+    return entries
+
+
+def _merge_entries(entries: List[Dict[str, Any]], seconds: int) -> List[List[Dict[str, Any]]]:
+    """相邻的「同触发方式 + 同目录」记录合并成组（与操作记录同一套规则）。"""
+    if seconds <= 0:
+        return [[entry] for entry in entries]
+    groups: List[Dict[str, Any]] = []
+    for entry in entries:
+        stamp = _time_seconds(entry["time"])
+        key = (entry["trigger"], entry["dir"])
+        if groups:
+            current = groups[-1]
+            if (
+                current["key"] == key
+                and stamp is not None
+                and current["last"] is not None
+                and abs(current["last"] - stamp) <= seconds
+                and abs(current["first"] - stamp) <= MERGE_SPAN_LIMIT
+            ):
+                current["rows"].append(entry)
+                current["last"] = stamp
+                continue
+        groups.append({"key": key, "rows": [entry], "first": stamp, "last": stamp})
+    return [item["rows"] for item in groups]
+
+
+def _record_entry_group(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """把多条记录渲染成一条聚合行（标签 + 计数 + 可展开明细），与操作记录聚合并行同款。"""
+    first = rows[0]
+    directory = first["dir"]
+    total = len(rows)
+    ok = sum(1 for item in rows if item["result"] == "success")
+    skipped = sum(1 for item in rows if item["result"] == "skipped")
+    failed = total - ok - skipped
+    tail = "/".join([part for part in directory.split("/") if part][-2:]) or directory
+    head: List[Dict[str, Any]] = [
+        _chip(
+            "事件" if first["trigger"] == "event" else "手动",
+            "info" if first["trigger"] == "event" else "grey",
+        ),
+        {"component": "span", "props": {"class": "nm", "title": directory}, "text": tail or "（无目录）"},
+        {"component": "span", "props": {"class": "cnt"}, "text": f"{total} 次"},
+    ]
+    meta: List[Dict[str, Any]] = [
+        {"component": "span", "props": {"class": "cd2strm-st ok"}, "text": f"成功 {ok}"}
+    ]
+    if skipped:
+        meta.append({"component": "span", "props": {"class": "cd2strm-st skip"}, "text": f"跳过 {skipped}"})
+    if failed:
+        meta.append({"component": "span", "props": {"class": "cd2strm-st bad"}, "text": f"失败 {failed}"})
+    if first.get("extra"):
+        meta.append(_chip(str(first["extra"]), "grey"))
+    if total > 1:
+        span = abs(
+            (_time_seconds(rows[0]["time"]) or 0) - (_time_seconds(rows[-1]["time"]) or 0)
+        )
+        meta.append({"component": "span", "props": {"class": "cd2strm-res"}, "text": f"历时 {span}s"})
+    meta.append(
+        {
+            "component": "span",
+            "props": {"class": "chev"},
+            "content": [
+                {"component": "span", "props": {"class": "cd2strm-gclosed"}, "text": f"展开 {total} 条 ▾"},
+                {"component": "span", "props": {"class": "cd2strm-gopen"}, "text": f"收起 {total} 条 ▴"},
+            ],
+        }
+    )
+    times = [str(item["time"]) for item in rows]
+    range_text = times[0] if len(times) == 1 else f'{times[-1].split(" ")[-1]}–{times[0].split(" ")[-1]}'
+    props: Dict[str, Any] = {"class": "cd2strm-gwrap"}
+    if failed:
+        props["open"] = True
+    return {
+        "component": "details",
+        "props": props,
+        "content": [
+            {
+                "component": "summary",
+                "content": [
+                    {"component": "span", "props": {"class": "tm"}, "text": range_text},
+                    {
+                        "component": "span",
+                        "props": {"class": "rail"},
+                        "content": [{"component": "span", "props": {"class": "dot"}}],
+                    },
+                    {
+                        "component": "div",
+                        "content": [
+                            {"component": "div", "props": {"class": "cd2strm-gsum"}, "content": head},
+                            {"component": "div", "props": {"class": "dr", "title": directory}, "text": directory},
+                            {"component": "div", "props": {"class": "mt"}, "content": meta},
+                        ],
+                    },
+                ],
+            },
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-gdet"},
+                "content": [item["node"] for item in rows],
+            },
+        ],
+    }
+
+
+def _records_feed(
+    title: str, entries: List[Dict[str, Any]], seconds: int, table_head: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """整理记录表（默认展开）：时间 / 触发 / 结果 / 媒体 / 文件。"""
-    head = {
+    """记录区（与 STRM 页的操作记录同款）：合并聚合行 + 固定高度滚动框 + 计数徽章。"""
+    groups = _merge_entries(entries, seconds)
+    total = len(entries)
+    items: List[Dict[str, Any]] = [
+        group[0]["node"] if len(group) == 1 else _record_entry_group(group) for group in groups
+    ]
+    if not items:
+        items = [{"component": "div", "props": {"class": "cd2strm-count"}, "text": f"暂无{title}"}]
+    head_content: List[Dict[str, Any]] = [
+        {"component": "span", "props": {"class": "cd2strm-fh"}, "text": title},
+        _chip(f"共 {total} 条", "grey"),
+    ]
+    if len(groups) < total:
+        head_content.append(_chip(f"合并为 {len(groups)} 组", "primary"))
+    head_content.append(
+        {"component": "span", "props": {"class": "cd2strm-count"}, "text": f"已显示最新 {total} 条"}
+    )
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-fsec"},
+        "content": [
+            {"component": "div", "props": {"class": "cd2strm-fhead"}, "content": head_content},
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-feed", "style": dict(FEED_BOX_STYLE)},
+                "content": [table_head, *items],
+            },
+        ],
+    }
+
+
+def _organize_record_node(item: Dict[str, Any]) -> Dict[str, Any]:
+    """单条整理记录的明细行（沿用原有表格列）。"""
+    result = str(item.get("result") or "")
+    if result == "success":
+        result_class, result_text = "cd2strm-ok", "成功"
+    elif result == "skipped":
+        result_class, result_text = "cd2strm-skip", "跳过"
+    else:
+        result_class, result_text = "cd2strm-bad", "失败"
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-tr org"},
+        "content": [
+            {"component": "div", "props": {"class": "cd2strm-t"}, "text": str(item.get("time") or "")},
+            {
+                "component": "div",
+                "content": [
+                    _chip(
+                        "事件" if item.get("trigger") == "event" else "手动",
+                        "info" if item.get("trigger") == "event" else "",
+                    )
+                ],
+            },
+            {
+                "component": "div",
+                "props": {"class": result_class, "title": str(item.get("message") or "")},
+                "text": result_text,
+            },
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-pth", "title": str(item.get("file") or "")},
+                "text": str(item.get("file") or ""),
+            },
+            {
+                "component": "div",
+                "props": {
+                    "class": "cd2strm-s",
+                    "title": str(item.get("media") or item.get("message") or ""),
+                },
+                "text": str(item.get("media") or "—"),
+            },
+        ],
+    }
+def _organize_records_head() -> Dict[str, Any]:
+    """整理记录的表头（明细行仍按这五列展示）。"""
+    return {
         "component": "div",
         "props": {"class": "cd2strm-tr th org"},
         "content": [
@@ -1941,58 +2531,6 @@ def _organize_records(
             {"component": "div", "props": {"class": "h"}, "text": "结果"},
             {"component": "div", "props": {"class": "h"}, "text": "文件"},
             {"component": "div", "props": {"class": "h"}, "text": "媒体"},
-        ],
-    }
-    rows: List[Dict[str, Any]] = []
-    if not records:
-        rows.append({"component": "div", "props": {"class": "cd2strm-count"}, "text": "暂无整理记录"})
-    for item in records:
-        # 结果三态：成功 / 跳过 / 失败（跳过是正常结果，不能渲染成失败）
-        result = str(item.get("result") or "")
-        if result == "success":
-            result_class, result_text = "cd2strm-ok", "成功"
-        elif result == "skipped":
-            result_class, result_text = "cd2strm-skip", "跳过"
-        else:
-            result_class, result_text = "cd2strm-bad", "失败"
-        reason_text = str(item.get("message") or "")
-        rows.append(
-            {
-                "component": "div",
-                "props": {"class": "cd2strm-tr org"},
-                "content": [
-                    {"component": "div", "props": {"class": "cd2strm-t"}, "text": str(item.get("time") or "")},
-                    {
-                        "component": "div",
-                        "content": [
-                            _chip("事件" if item.get("trigger") == "event" else "手动",
-                                  "info" if item.get("trigger") == "event" else "")
-                        ],
-                    },
-                    {
-                        "component": "div",
-                        "props": {"class": result_class, "title": reason_text},
-                        "text": result_text,
-                    },
-                    {
-                        "component": "div",
-                        "props": {"class": "cd2strm-pth", "title": str(item.get("file") or "")},
-                        "text": str(item.get("file") or ""),
-                    },
-                    {
-                        "component": "div",
-                        "props": {"class": "cd2strm-s", "title": str(item.get("media") or reason_text)},
-                        "text": str(item.get("media") or "—"),
-                    },
-                ],
-            }
-        )
-    return {
-        "component": "details",
-        "props": {"class": "cd2strm-fold", "open": True},
-        "content": [
-            {"component": "summary", "text": f"整理记录 · {len(records)} 条"},
-            {"component": "div", "content": [head, *rows]},
         ],
     }
 
@@ -2006,12 +2544,31 @@ def _organize_group_card(
     records: List[Dict[str, Any]],
     hit_events: Optional[List[Dict[str, Any]]] = None,
     page_size: int = 5,
+    merge_seconds: int = 0,
 ) -> Dict[str, Any]:
-    """整理组面板：路径、KPI、操作按钮与整理记录（第一组默认展开）。"""
+    """整理组面板：路径 + 按钮 + 整理记录（合并聚合行）+ CD2 通知时间线。"""
     name = rule.display_name(index)
+    accent = GROUP_COLORS[index % len(GROUP_COLORS)]
     head: List[Dict[str, Any]] = [
-        {"component": "span", "props": {"class": "cd2strm-stripe"}},
-        {"component": "span", "props": {"class": "cd2strm-idx"}, "text": f"{index + 1} ·"},
+        {
+            "component": "span",
+            "props": {"class": "cd2strm-stripe", "style": {"background": accent, "width": "5px"}},
+        },
+        {
+            "component": "span",
+            "props": {
+                "class": "cd2strm-idx",
+                "style": {
+                    "background": accent,
+                    "color": "#fff",
+                    "border-radius": "4px",
+                    "padding": "0 6px",
+                    "line-height": "18px",
+                    "font-weight": "700",
+                },
+            },
+            "text": str(index + 1),
+        },
         {"component": "span", "text": name},
         _chip("通知开" if rule.notify else "通知关", "primary" if rule.notify else "grey"),
         {"component": "span", "props": {"class": "cd2strm-sp"}},
@@ -2033,34 +2590,8 @@ def _organize_group_card(
         },
         {
             "component": "div",
-            "props": {"class": "cd2strm-kpis"},
-            "content": [
-                _kpi(str(stats.get("accepted", 0)), "收到通知"),
-                _kpi(str(stats.get("organized", 0)), "已整理", tone="ok"),
-                _kpi(str(stats.get("skipped", 0)), "跳过", tone="muted"),
-                _kpi(str(stats.get("failed", 0)), "失败", tone="bad"),
-                _kpi(str(stats.get("metadata", 0)), "元数据"),
-                _kpi(str(stats.get("cleaned", 0)), "清理", tone="muted"),
-            ],
-        },
-        {
-            "component": "div",
             "props": {"class": "cd2strm-btns"},
             "content": [
-                _button(
-                    f"plugin/{plugin_id}/organize-clear?apikey={api_token}",
-                    {"index": index},
-                    "清空数值",
-                    "mdi-counter",
-                    "grey",
-                ),
-                _button(
-                    f"plugin/{plugin_id}/organize?apikey={api_token}",
-                    {"operation": "copy", "index": index},
-                    "复制这一组",
-                    "mdi-content-copy",
-                    "grey",
-                ),
                 _button(
                     f"plugin/{plugin_id}/organize?apikey={api_token}",
                     {"operation": "delete", "index": index},
@@ -2077,133 +2608,101 @@ def _organize_group_card(
                 ),
             ],
         },
-        _notifications_card(
-            f"organize{index}",
+        # 记录在上、CD2 通知在下（与 STRM 同步页一致）
+        _records_feed("整理记录", _record_entries(records, "organize"), merge_seconds, _organize_records_head()),
+        _sync_feed(
             1,
             page_size,
-            hit_events or [],
+            _merge_events(hit_events or [], merge_seconds),
+            None,
+            None,
             "暂无命中通知：只有命中本整理组规则的通知才会出现在这里。",
         ),
-        _organize_records(records, 1, page_size),
     ]
-    props: Dict[str, Any] = {"class": "cd2strm-group"}
+    props: Dict[str, Any] = {
+        "class": "cd2strm-group",
+        "open": True,
+        "style": {**_accent_border(accent, "1.5px", 0.65), "border-radius": "10px"},
+    }
     return {
         "component": "details",
         "props": props,
         "content": [
-            {"component": "summary", "props": {"class": "cd2strm-phead"}, "content": head},
+            {
+                "component": "summary",
+                "props": {"class": "cd2strm-phead", "style": {"background": _tint(accent, 0.18)}},
+                "content": head,
+            },
             {"component": "div", "props": {"class": "cd2strm-sub"}, "content": sub},
         ],
     }
 
 
-def _mirror_status_card(
-    plugin_id: str, api_token: str, status: Dict[str, Any], group_count: int
-) -> Dict[str, Any]:
-    """镜像移动视图的状态面板：状态、预演徽章、KPI 与右上角按钮。"""
-    enabled = bool(status.get("enabled"))
-    dry_run = bool(status.get("dry_run", True))
-    head: List[Dict[str, Any]] = [
-        {"component": "span", "props": {"class": "cd2strm-stripe"}},
-        {"component": "span", "text": "镜像移动"},
-        _chip("已启用" if enabled else "已停用", "success" if enabled else "grey"),
-        _chip(
-            "预演模式（不移动文件）" if dry_run else "正式执行（会移动文件）",
-            "warn" if dry_run else "error",
-        ),
-        {"component": "span", "props": {"class": "cd2strm-sp"}},
-        {"component": "span", "props": {"class": "cd2strm-meta"}, "text": f"共 {group_count} 组"},
-        # 刷新 / 清除计数 / 清空通知与记录 / 清空日志 已统一到顶部「消息与日志」区
-    ]
-    body: List[Dict[str, Any]] = [
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-kpis k4"},
-            "content": [
-                _kpi(str(status.get("accepted", 0)), "受理通知"),
-                _kpi(str(status.get("moved_files", 0)), "移动文件", tone="ok"),
-                _kpi(str(status.get("moved_dirs", 0)), "移动目录", tone="ok"),
-                _kpi(str(status.get("failed", 0)), "失败", tone="bad"),
-            ],
-        },
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-hint"},
-            "text": "监听目录里删除什么，就把镜像目录里对应的对象移到回收站；保护白名单命中的对象不移动。"
-            "预演模式开启时只记录「将要移动什么」，不会真正移动文件。",
-        },
-    ]
+def _result_class(result: str) -> str:
+    """记录结果 → 状态类名（三态：成功 / 跳过 / 失败）。"""
+    if result == "success":
+        return "cd2strm-ok"
+    if result == "skipped":
+        return "cd2strm-skip"
+    return "cd2strm-bad"
+
+
+def _result_text(result: str) -> str:
+    """记录结果 → 中文文案（与整理页一致）。"""
+    if result == "success":
+        return "成功"
+    if result == "skipped":
+        return "跳过"
+    return "失败"
+
+
+def _mirror_record_node(item: Dict[str, Any]) -> Dict[str, Any]:
+    """单条镜像记录的明细行（沿用原有表格列）。"""
     return {
         "component": "div",
-        "props": {"class": "cd2strm-panel"},
+        "props": {"class": "cd2strm-tr mir"},
         "content": [
-            {"component": "div", "props": {"class": "cd2strm-phead"}, "content": head},
-            {"component": "div", "props": {"class": "cd2strm-pbody"}, "content": body},
-        ],
-    }
-
-
-def _mirror_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """镜像记录表格（默认折叠，一行一条）。"""
-    rows: List[Dict[str, Any]] = [
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-tr th mir"},
-            "content": [
-                {"component": "div", "props": {"class": "h"}, "text": "时间"},
-                {"component": "div", "props": {"class": "h"}, "text": "触发"},
-                {"component": "div", "props": {"class": "h"}, "text": "结果"},
-                {"component": "div", "props": {"class": "h"}, "text": "监听目录对象"},
-                {"component": "div", "props": {"class": "h"}, "text": "移动项"},
-            ],
-        }
-    ]
-    for item in records[-10:]:
-        rows.append(
+            {"component": "div", "props": {"class": "cd2strm-t"}, "text": str(item.get("time") or "")},
             {
                 "component": "div",
-                "props": {"class": "cd2strm-tr mir"},
                 "content": [
-                    {
-                        "component": "div",
-                        "props": {"class": "cd2strm-s"},
-                        "text": str(item.get("time") or ""),
-                    },
-                    {
-                        "component": "div",
-                        "props": {"class": "cd2strm-s"},
-                        "text": str(item.get("trigger") or ""),
-                    },
-                    {
-                        "component": "div",
-                        "props": {"class": "cd2strm-s"},
-                        "text": str(item.get("result") or ""),
-                    },
-                    {
-                        "component": "div",
-                        "props": {
-                            "class": "cd2strm-pth",
-                            "title": str(item.get("path") or ""),
-                        },
-                        "text": str(item.get("path") or ""),
-                    },
-                    {
-                        "component": "div",
-                        "props": {
-                            "class": "cd2strm-s",
-                            "title": str(item.get("target") or ""),
-                        },
-                        "text": str(item.get("target") or ""),
-                    },
+                    _chip(
+                        "事件" if item.get("trigger") == "event" else "手动",
+                        "info" if item.get("trigger") == "event" else "grey",
+                    )
                 ],
-            }
-        )
+            },
+            {
+                "component": "div",
+                "props": {
+                    "class": _result_class(str(item.get("result") or "")),
+                    "title": str(item.get("message") or ""),
+                },
+                "text": _result_text(str(item.get("result") or "")),
+            },
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-pth", "title": str(item.get("path") or "")},
+                "text": str(item.get("path") or ""),
+            },
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-s", "title": str(item.get("target") or "")},
+                "text": str(item.get("target") or ""),
+            },
+        ],
+    }
+def _mirror_records_head() -> Dict[str, Any]:
+    """镜像记录的表头。"""
     return {
-        "component": "details",
-        "props": {"class": "cd2strm-fold"},
+        "component": "div",
+        "props": {"class": "cd2strm-tr th mir"},
         "content": [
-            {"component": "summary", "text": f"镜像记录 · {len(records)} 条"},
-            {"component": "div", "content": rows},
+            {"component": "div", "props": {"class": "h"}, "text": "时间"},
+            {"component": "div", "props": {"class": "h"}, "text": "触发"},
+            {"component": "div", "props": {"class": "h"}, "text": "结果"},
+            {"component": "div", "props": {"class": "h"}, "text": "监听目录对象"},
+            {"component": "div", "props": {"class": "h"}, "text": "移动项"},
         ],
     }
 
@@ -2229,15 +2728,16 @@ def _mirror_ignored_card(ignored: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "component": "div",
                 "props": {"class": "cd2strm-tr ign"},
                 "content": [
+                    {"component": "div", "props": {"class": "cd2strm-t"}, "text": str(item.get("time") or "")},
                     {
                         "component": "div",
-                        "props": {"class": "cd2strm-s"},
-                        "text": str(item.get("time") or ""),
-                    },
-                    {
-                        "component": "div",
-                        "props": {"class": "cd2strm-s"},
-                        "text": str(item.get("change_type") or ""),
+                        "content": [
+                            # 与整理页一致：变更用中文徽章并按类型着色
+                            _chip(
+                                CHANGE_LABELS.get(str(item.get("change_type") or ""), "变更"),
+                                CHANGE_TONES.get(str(item.get("change_type") or ""), "grey"),
+                            )
+                        ],
                     },
                     {
                         "component": "div",
@@ -2249,7 +2749,10 @@ def _mirror_ignored_card(ignored: List[Dict[str, Any]]) -> Dict[str, Any]:
                     },
                     {
                         "component": "div",
-                        "props": {"class": "cd2strm-s"},
+                        "props": {
+                            "class": "cd2strm-s cd2strm-bad",
+                            "title": str(item.get("reason") or ""),
+                        },
                         "text": str(item.get("reason") or ""),
                     },
                     {
@@ -2262,7 +2765,7 @@ def _mirror_ignored_card(ignored: List[Dict[str, Any]]) -> Dict[str, Any]:
         )
     return {
         "component": "details",
-        "props": {"class": "cd2strm-fold"},
+        "props": {"class": "cd2strm-fold", "style": {**BLOCK_BORDERS["others"]}},
         "content": [
             {"component": "summary", "text": f"未匹配的镜像通知 · {len(ignored)} 条"},
             {"component": "div", "content": rows},
@@ -2278,11 +2781,30 @@ def _mirror_group_card(
     stats: Dict[str, Any],
     records: List[Dict[str, Any]],
     hit_events: Optional[List[Dict[str, Any]]] = None,
+    merge_seconds: int = 0,
 ) -> Dict[str, Any]:
-    """镜像组面板：三项路径、KPI、镜像记录与折叠头右侧的启用开关（默认折叠）。"""
+    """镜像组面板：三项路径 + 按钮 + 镜像记录（合并聚合行）+ CD2 通知时间线。"""
+    accent = GROUP_COLORS[index % len(GROUP_COLORS)]
     head: List[Dict[str, Any]] = [
-        {"component": "span", "props": {"class": "cd2strm-stripe"}},
-        {"component": "span", "props": {"class": "cd2strm-idx"}, "text": f"{index + 1} ·"},
+        {
+            "component": "span",
+            "props": {"class": "cd2strm-stripe", "style": {"background": accent, "width": "5px"}},
+        },
+        {
+            "component": "span",
+            "props": {
+                "class": "cd2strm-idx",
+                "style": {
+                    "background": accent,
+                    "color": "#fff",
+                    "border-radius": "4px",
+                    "padding": "0 6px",
+                    "line-height": "18px",
+                    "font-weight": "700",
+                },
+            },
+            "text": str(index + 1),
+        },
         {"component": "span", "text": rule.display_name(index)},
         _chip(f"保护 {len(rule.protect_list)} 项", "primary" if rule.protect_list else "grey"),
         {"component": "span", "props": {"class": "cd2strm-sp"}},
@@ -2305,34 +2827,8 @@ def _mirror_group_card(
         },
         {
             "component": "div",
-            "props": {"class": "cd2strm-kpis"},
-            "content": [
-                _kpi(str(stats.get("accepted", 0)), "受理通知"),
-                _kpi(str(stats.get("moved_files", 0)), "移动文件", tone="ok"),
-                _kpi(str(stats.get("moved_dirs", 0)), "移动目录", tone="ok"),
-                _kpi(str(stats.get("protected", 0)), "保护跳过", tone="muted"),
-                _kpi(str(stats.get("skipped", 0)), "跳过", tone="muted"),
-                _kpi(str(stats.get("failed", 0)), "失败", tone="bad"),
-            ],
-        },
-        {
-            "component": "div",
             "props": {"class": "cd2strm-btns"},
             "content": [
-                _button(
-                    f"plugin/{plugin_id}/mirror-clear?apikey={api_token}",
-                    {"index": index},
-                    "清空数值",
-                    "mdi-counter",
-                    "grey",
-                ),
-                _button(
-                    f"plugin/{plugin_id}/mirror?apikey={api_token}",
-                    {"index": index, "operation": "copy"},
-                    "复制这一组",
-                    "mdi-content-copy",
-                    "grey",
-                ),
                 _button(
                     f"plugin/{plugin_id}/mirror?apikey={api_token}",
                     {"index": index, "operation": "delete"},
@@ -2342,91 +2838,26 @@ def _mirror_group_card(
                 ),
             ],
         },
-        _notifications_card(
-            f"mirror{index}",
+        # 记录在上、CD2 通知在下（与 STRM 同步页一致）
+        _records_feed("镜像记录", _record_entries(records, "mirror"), merge_seconds, _mirror_records_head()),
+        _sync_feed(
             1,
             5,
-            hit_events or [],
+            _merge_events(hit_events or [], merge_seconds),
+            None,
+            None,
             "暂无命中通知：只有监听目录里的删除通知才会命中本镜像组。",
         ),
-        _mirror_records(records),
     ]
-    return _collapsible(summary=head, body=body, css="cd2strm-group")
-
-
-def _status_card(plugin_id: str, api_token: str, status: Dict[str, Any]) -> Dict[str, Any]:
-    """构建运行状态面板：状态色条、关键数字、连接明细与刷新/清空按钮。"""
-    connections = status.get("connections") or []
-    if not status.get("enabled"):
-        tone, state_text, state_tone = "bad", "未启用", "bad"
-    elif not connections:
-        tone, state_text, state_tone = "warn", "未配置地址", "muted"
-    elif status.get("connected"):
-        tone, state_text, state_tone = "", "订阅已连接", "ok"
-    else:
-        tone, state_text, state_tone = "bad", "订阅未连接", "bad"
-    scanning = _safe_count(status, "scanning")
-    body: List[Dict[str, Any]] = [
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-kpis k4"},
-            "content": [
-                _kpi(state_text, "总状态", tone=state_tone),
-                _kpi(str(status.get("message_count", 0)), "累计通知"),
-                _kpi(str(status.get("pending", 0)), "待处理目录", tone="muted"),
-                _kpi(str(scanning), "正在扫描", tone="muted"),
-            ],
-        },
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-hint"},
-            "text": "　｜　".join(
-                f"{item.get('label')}：{'已连接' if item.get('connected') else '未连接'}"
-                f"（{item.get('message_count', 0)}）"
-                for item in connections
-            )
-            or "尚未配置 CloudDrive2 地址",
-        },
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-hint"},
-            "text": (
-                f"最后通知：{status.get('last_message_at') or '无'}"
-                f"　｜　定时扫描：{status.get('schedule_text') or '已关闭'}"
-            ),
-        },
-    ]
-    if status.get("last_error"):
-        body.append(
-            {
-                "component": "div",
-                "props": {"class": "cd2strm-alert bad"},
-                "content": [
-                    {"component": "span", "props": {"class": "cd2strm-bad"}, "text": "最近错误"},
-                    {"component": "span", "text": str(status["last_error"])},
-                ],
-            }
-        )
-    head: List[Dict[str, Any]] = [
-        {"component": "span", "props": {"class": f"cd2strm-stripe {tone}".strip()}},
-        {"component": "span", "text": "运行状态"},
-    ]
-    if scanning:
-        head.append(_chip("正在扫描", "warn"))
-    head.extend(
-        [
-            {"component": "span", "props": {"class": "cd2strm-sp"}},
-            # 刷新 / 清除计数 / 清空通知与记录 / 清空日志 已统一到顶部「消息与日志」区
-        ]
+    return _collapsible(
+        summary=head,
+        body=body,
+        opened=True,
+        css="cd2strm-group",
+        summary_style={"background": _tint(accent, 0.18)},
+        # 展开后的整块外框也用该组标识色
+        style={**_accent_border(accent, "1.5px", 0.65), "border-radius": "10px"},
     )
-    return {
-        "component": "div",
-        "props": {"class": "cd2strm-panel"},
-        "content": [
-            {"component": "div", "props": {"class": "cd2strm-phead"}, "content": head},
-            {"component": "div", "props": {"class": "cd2strm-pbody"}, "content": body},
-        ],
-    }
 
 
 def _safe_count(stats: Dict[str, Any], key: str) -> int:
@@ -2448,18 +2879,14 @@ def _rule_group_card(
     page: int,
     page_size: int,
     progress: Optional[Dict[str, Any]] = None,
+    merge_seconds: int = 0,
 ) -> Dict[str, Any]:
-    """构建单个目录组卡片：标题徽章、路径、KPI、操作按钮与该组的通知、操作记录。"""
+    """构建单个目录组卡片：标题徽章、路径、操作按钮与该组的通知、操作记录。"""
     base = f"plugin/{plugin_id}"
     suffix = f"?apikey={api_token}"
     key = str(index)
     precise = (rule.process_mode or "precise") == "precise"
     failures = _safe_count(stats, "links_failed") + _safe_count(stats, "metadata_failed")
-    cleaned = (
-        _safe_count(stats, "removed_links")
-        + _safe_count(stats, "removed_metadata")
-        + _safe_count(stats, "removed_dirs")
-    )
     body: List[Dict[str, Any]] = [
         {
             "component": "div",
@@ -2467,20 +2894,6 @@ def _rule_group_card(
             "content": [
                 _path_cell("源目录", rule.media_dir or "未设置"),
                 _path_cell("目的目录", rule.local_dir or "未设置"),
-            ],
-        },
-        {
-            "component": "div",
-            "props": {"class": "cd2strm-kpis"},
-            "content": [
-                _kpi(str(_safe_count(stats, "scanned_files")), "扫描媒体", tone="muted"),
-                _kpi(str(_safe_count(stats, "links_created")), "新增"),
-                _kpi(str(_safe_count(stats, "links_updated")), "更新", tone="muted"),
-                _kpi(str(_safe_count(stats, "links_skipped")), "跳过", tone="muted"),
-                _kpi(str(failures), "失败", tone="bad" if failures else ""),
-                _kpi(str(_safe_count(stats, "metadata_copied")), "元数据复制"),
-                _kpi(str(_safe_count(stats, "metadata_skipped")), "元数据跳过", tone="muted"),
-                _kpi(str(cleaned), "清理", tone="muted"),
             ],
         },
     ]
@@ -2527,31 +2940,6 @@ def _rule_group_card(
             "component": "div",
             "props": {"class": "cd2strm-btns"},
             "content": [
-                {
-                    "component": "VBtn",
-                    "props": {
-                        "color": "grey",
-                        "variant": "text",
-                        "size": "small",
-                        "prepend-icon": "mdi-counter",
-                        "title": "只清空上方显示的统计数值，不影响操作记录与已生成的文件",
-                    },
-                    "text": "清空数值",
-                    "events": {
-                        "click": {
-                            "api": f"{base}/clear{suffix}",
-                            "method": "post",
-                            "params": {"index": index},
-                        }
-                    },
-                },
-                _button(
-                    f"{base}/rule{suffix}",
-                    {"index": index, "operation": "copy"},
-                    "复制这一组",
-                    "mdi-content-copy",
-                    "secondary",
-                ),
                 _button(
                     f"{base}/rule{suffix}",
                     {"index": index, "operation": "delete"},
@@ -2569,25 +2957,57 @@ def _rule_group_card(
             ],
         }
     )
-    body.append(_notifications_card(key, page, page_size, events))
-    body.append(_actions_card(page, page_size, actions))
+    note_groups = _merge_events(events, merge_seconds)
+    act_groups = _merge_actions(actions, merge_seconds)
+    pairs = _pair_groups(note_groups, act_groups)
+    reverse_pairs = {
+        act_index: note_index
+        for note_index, act_indexes in pairs.items()
+        for act_index in act_indexes
+    }
+    # 先操作记录（做了什么、生成了什么），再 CD2 通知（收到什么），两边按目录与时间对应
+    body.append(_record_feed(page, page_size, act_groups, reverse_pairs, note_groups))
+    body.append(_sync_feed(page, page_size, note_groups, pairs, act_groups))
     body.append(
-        _pager(plugin_id, api_token, key, page, page_size, max(len(events), len(actions)))
-    )
-    # 头部：状态色条 + 序号 + 组名 + 徽章 + 上次处理时间；第一组默认展开，其余默认折叠
-    if progress:
-        tone = "warn"
-    elif failures:
-        tone = "bad"
-    else:
-        tone = ""
-    head: List[Dict[str, Any]] = [
-        {"component": "span", "props": {"class": f"cd2strm-stripe {tone}".strip()}}
-    ]
-    if rule.name:
-        head.append(
-            {"component": "span", "props": {"class": "cd2strm-idx"}, "text": f"{index + 1} ·"}
+        _pager(
+            plugin_id,
+            api_token,
+            key,
+            page,
+            page_size,
+            max(len(note_groups), len(act_groups)),
         )
+    )
+    # 头部：标识色条（每组一色）+ 序号徽章 + 组名 + 状态徽章 + 上次处理时间；
+    # 全部目录组默认展开（用户要求），需要收起时点标题
+    accent = GROUP_COLORS[index % len(GROUP_COLORS)]
+    head: List[Dict[str, Any]] = [
+        {
+            "component": "span",
+            "props": {
+                "class": "cd2strm-stripe",
+                "style": {"background": accent, "width": "5px"},
+            },
+        }
+    ]
+    head.append(
+        {
+            "component": "span",
+            "props": {
+                "class": "cd2strm-idx",
+                "style": {
+                    "background": accent,
+                    "color": "#fff",
+                    "border-radius": "4px",
+                    "padding": "0 6px",
+                    "line-height": "18px",
+                    "font-weight": "700",
+                },
+                "title": f"第 {index + 1} 组",
+            },
+            "text": str(index + 1),
+        }
+    )
     head.append(
         _text_node(rule.name or f"目录组 {index + 1}", "text-body-1", {"font-weight": "600"})
     )
@@ -2600,6 +3020,8 @@ def _rule_group_card(
     )
     if progress:
         head.append(_chip("正在扫描", "warn"))
+    if failures:
+        head.append(_chip(f"失败 {failures}", "error"))
     if has_nested_target(rule):
         head.append(_chip("目的目录在源目录内（已自动排除）", "error"))
     head.append({"component": "span", "props": {"class": "cd2strm-sp"}})
@@ -2614,7 +3036,16 @@ def _rule_group_card(
         }
     )
     head.append(_enable_row(plugin_id, api_token, "sync", index, rule.enabled))
-    return _collapsible(summary=head, body=body, css="cd2strm-group")
+    return _collapsible(
+        summary=head,
+        body=body,
+        opened=True,
+        css="cd2strm-group",
+        # 整个组头一行染成该组的标识色（左侧再压一条实色竖条），一眼区分是哪一组
+        summary_style={"background": _tint(accent, 0.18)},
+        # 展开后的整块外框也用该组标识色
+        style={**_accent_border(accent, "1.5px", 0.65), "border-radius": "10px"},
+    )
 
 
 def _collapsible(
@@ -2622,20 +3053,836 @@ def _collapsible(
     body: List[Dict[str, Any]],
     opened: bool = False,
     css: str = "",
+    summary_style: Optional[Dict[str, Any]] = None,
+    style: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """构造原生可折叠块：details + summary，opened 决定默认是否展开。"""
+    """构造原生可折叠块：details + summary，opened 决定默认是否展开。
+
+    summary_style 用于给折叠头整行上色（目录组标识色）。
+    """
     classes = "cd2strm-fold"
     if css:
         classes = f"{classes} {css}"
     props: Dict[str, Any] = {"class": classes}
     if opened:
         props["open"] = True
+    if style:
+        props["style"] = dict(style)
+    summary_props: Dict[str, Any] = {}
+    if summary_style:
+        summary_props["style"] = dict(summary_style)
     return {
         "component": "details",
         "props": props,
         "content": [
-            {"component": "summary", "content": summary},
+            {"component": "summary", "props": summary_props, "content": summary},
             {"component": "div", "props": {"class": "cd2strm-sub"}, "content": body},
+        ],
+    }
+
+
+# ---------------------------------------------------------------- 详情页 C 布局构建件
+# 「活动流 + 常驻侧栏」：左栏按目录组给出时间线式的通知与操作记录流，右栏常驻运行状态与目录组导览。
+# 本组构件只做排布与呈现；按钮、开关、分页、接口调用一律沿用原有构件，保证功能不丢。
+
+
+def _split_path(path: str) -> tuple:
+    """把路径拆成（目录, 文件名）：文件名在活动流里加粗，目录淡显。"""
+    head, _, tail = path.rpartition("/")
+    return head, tail
+
+
+def _side_card(title: str, content: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """构造侧栏卡片（标题 + 若干内容节点）。"""
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-scard"},
+        "content": [
+            {"component": "div", "props": {"class": "hd"}, "text": title},
+            *content,
+        ],
+    }
+
+
+def _status_line(
+    title: str,
+    parts: List[Tuple[str, str, str]],
+    chips: Optional[List[Tuple[str, str]]] = None,
+    hint: str = "",
+    alerts: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """一行式状态行（与「连接状态」同款）：标题 + 若干「标签 值」+ 徽章 + 提示 + 红色告警。
+
+    整理 / 镜像两个视图的状态区用它替代原来那块面板+KPI 网格，保持三个视图观感一致。
+    """
+    content: List[Dict[str, Any]] = [
+        {"component": "span", "props": {"class": "cd2strm-fh"}, "text": title}
+    ]
+    for label, value, tone in parts:
+        content.append({"component": "span", "props": {"style": dict(CONN_SEP_STYLE)}})
+        content.append(
+            {
+                "component": "span",
+                "props": {"style": {"display": "inline-flex", "align-items": "baseline", "gap": "5px"}},
+                "content": [
+                    {"component": "span", "props": {"class": "cd2strm-count"}, "text": label},
+                    {"component": "span", "props": {"class": f"cd2strm-st {tone}".strip()}, "text": value},
+                ],
+            }
+        )
+    for text, tone in chips or []:
+        content.append(_chip(text, tone))
+    if hint:
+        content.append(
+            {"component": "span", "props": {"class": "cd2strm-hint", "style": {"margin": "0"}}, "text": hint}
+        )
+    for text in alerts or []:
+        content.append({"component": "span", "props": {"class": "cd2strm-bad"}, "text": text})
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-connline", "style": {**CONN_LINE_STYLE, **BLOCK_BORDERS["conn"]}},
+        "content": content,
+    }
+
+
+def _organize_status_line(status: Dict[str, Any], group_count: int) -> Dict[str, Any]:
+    """媒体整理的状态一行式。"""
+    enabled = bool(status.get("organize_enabled"))
+    alerts: List[str] = []
+    if not enabled:
+        alerts.append("媒体整理当前未启用：到配置页「媒体整理配置」里开启并填写整理组")
+    if status.get("last_error"):
+        alerts.append(f"最近错误：{status['last_error']}")
+    return _status_line(
+        "整理状态",
+        [
+            ("收到通知", str(status.get("accepted", 0)), ""),
+            ("待整理", str(status.get("pending", 0)), "muted"),
+            ("正在整理", str(status.get("running", 0)), "muted"),
+            ("整理组", f"{group_count} 组", "muted"),
+            ("整理记录", f"{int(status.get('record_count') or 0)} 条", "muted"),
+        ],
+        chips=[
+            ("已启用" if enabled else "未启用", "success" if enabled else "grey"),
+            ("通知开" if status.get("notify") else "通知关", "primary" if status.get("notify") else "grey"),
+            ("通知来源：与 STRM 同步共用", "grey"),
+            ("整理链：MoviePilot TransferChain", "grey"),
+        ],
+        alerts=alerts,
+    )
+
+
+def _mirror_status_line(status: Dict[str, Any], group_count: int) -> Dict[str, Any]:
+    """镜像移动的状态一行式（含预演模式提醒）。"""
+    enabled = bool(status.get("enabled"))
+    dry_run = bool(status.get("dry_run", True))
+    return _status_line(
+        "镜像状态",
+        [
+            ("受理通知", str(status.get("accepted", 0)), ""),
+            ("移动文件", str(status.get("moved_files", 0)), "ok"),
+            ("移动目录", str(status.get("moved_dirs", 0)), "ok"),
+            ("保护跳过", str(status.get("protected", 0)), "muted"),
+            ("失败", str(status.get("failed", 0)), "bad" if status.get("failed") else "muted"),
+            ("共", f"{group_count} 组", "muted"),
+        ],
+        chips=[
+            ("已启用" if enabled else "已停用", "success" if enabled else "grey"),
+            ("预演模式（不移动文件）" if dry_run else "正式执行（会移动文件）", "warn" if dry_run else "error"),
+        ],
+        hint=(
+            "预演模式开启时只记录「将要移动什么」，不会真正移动文件"
+            if dry_run
+            else "监听目录里删除什么，就把镜像目录里对应的对象移到回收站；保护白名单命中的对象不移动"
+        ),
+    )
+
+
+def _connection_line(status: Dict[str, Any]) -> Dict[str, Any]:
+    """连接状态一行式：标题 + 每路地址（状态点、主机、连接情况、消息数）+ 最近错误。"""
+    items: List[Dict[str, Any]] = [
+        {"component": "span", "props": {"class": "cd2strm-fh"}, "text": "连接状态"}
+    ]
+    connections = status.get("connections") or []
+    if not connections:
+        items.append(
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-count"},
+                "text": "插件未启用" if not status.get("enabled") else "尚未配置 CloudDrive2 地址",
+            }
+        )
+    for index, item in enumerate(connections):
+        ok = bool(item.get("connected"))
+        host = str(item.get("host") or "")
+        items.append({"component": "span", "props": {"style": dict(CONN_SEP_STYLE)}})
+        addr: List[Dict[str, Any]] = [
+            {
+                "component": "span",
+                # 类名与内联样式都给上：类名沿用既有 CSS，内联保证宿主不应用注入样式时也正常
+                "props": {
+                    "class": "cd2strm-dot",
+                    "style": dict(
+                        CONN_DOT_STYLE,
+                        background=f"rgb(var(--v-theme-{'success' if ok else 'error'},46,125,50))",
+                    ),
+                },
+            },
+            {
+                "component": "span",
+                "text": str(item.get("label") or f"地址 {index + 1}"),
+            },
+        ]
+        if host:
+            addr.append(
+                {
+                    "component": "code",
+                    "props": {"title": host, "style": {"font-size": "11.5px", "opacity": ".85"}},
+                    "text": host,
+                }
+            )
+        addr.append(
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-count"},
+                "text": f"{'已连接' if ok else '未连接'} · {int(item.get('message_count') or 0)} 条",
+            }
+        )
+        items.append({"component": "span", "props": {"class": "cd2strm-adr"}, "content": addr})
+    if status.get("last_error"):
+        items.append({"component": "span", "props": {"style": dict(CONN_SEP_STYLE)}})
+        items.append(
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-bad", "title": str(status["last_error"])},
+                "text": f"最近错误：{status['last_error']}",
+            }
+        )
+    return {"component": "div", "props": {"class": "cd2strm-connline", "style": {**CONN_LINE_STYLE, **BLOCK_BORDERS["conn"]}}, "content": items}
+
+
+def _feed_line(event: Dict[str, Any]) -> Dict[str, Any]:
+    """把一条 CD2 通知渲染成活动流行：时间 / 轴点 / 变更+文件名 / 目录 / 结果。"""
+    path = str(event.get("path") or "")
+    directory, name = _split_path(path)
+    result = str(event.get("result") or "")
+    if not event.get("done"):
+        tone, state_text = "run", "处理中"
+    elif result.startswith("失败"):
+        tone, state_text = "bad", "失败"
+    elif result.startswith("跳过"):
+        tone, state_text = "skip", "跳过"
+    else:
+        tone, state_text = "ok", "完成"
+    if not result and not event.get("done"):
+        result = "等待处理"
+    head: List[Dict[str, Any]] = []
+    if event.get("own_move"):
+        # 镜像把对象移进回收站的回声：CD2 报的是 rename，但这里不该显示「改名」
+        head.append(_chip("移入回收站", "warn"))
+    else:
+        head.append(_change_chip(str(event.get("change_type") or "")))
+    outcome = str(event.get("outcome") or "")
+    if outcome and outcome != "已受理":
+        head.append(_chip(outcome, {"已忽略": "grey"}.get(outcome, "info")))
+    head.append(
+        {
+            "component": "span",
+            "props": {"class": "nm", "title": path},
+            "text": name or path or "（无路径）",
+        }
+    )
+    meta: List[Dict[str, Any]] = [
+        {"component": "span", "props": {"class": f"cd2strm-st {tone}".strip()}, "text": state_text},
+        {
+            "component": "span",
+            "props": {"class": "cd2strm-res", "title": result},
+            "text": result or "—",
+        },
+    ]
+    if event.get("internal"):
+        meta.append(_chip("自身生成", "grey"))
+    if event.get("source"):
+        meta.append(_chip(str(event["source"]), "grey"))
+    return {
+        "component": "div",
+        "props": {"class": f"cd2strm-fi {tone}".strip()},
+        "content": [
+            {"component": "span", "props": {"class": "tm"}, "text": str(event.get("time") or "")},
+            {
+                "component": "span",
+                "props": {"class": "rail"},
+                "content": [{"component": "span", "props": {"class": "dot"}}],
+            },
+            {
+                "component": "div",
+                "props": {"class": "bd"},
+                "content": [
+                    {"component": "div", "props": {"class": "top"}, "content": head},
+                    {"component": "div", "props": {"class": "dr", "title": path}, "text": directory or "/"},
+                    {"component": "div", "props": {"class": "mt"}, "content": meta},
+                ],
+            },
+        ],
+    }
+
+
+def _time_seconds(text: str) -> Optional[int]:
+    """把 MM-DD HH:MM:SS 里的时分秒换算成秒数（同一天内可比较）。"""
+    try:
+        _, clock = str(text).split(" ")
+        hour, minute, second = (int(item) for item in clock.split(":"))
+    except (ValueError, AttributeError):
+        return None
+    return (hour * 60 + minute) * 60 + second
+
+
+def _merge_kind(event: Dict[str, Any]) -> str:
+    """合并分类：自身「移入回收站」单独一类，其余按变更类型。"""
+    if event.get("own_move"):
+        return "move"
+    return str(event.get("change_type") or "")
+
+
+def _merge_events(
+    events: List[Dict[str, Any]], seconds: int
+) -> List[List[Dict[str, Any]]]:
+    """把相邻的「同目录 + 同类型」通知合并成组（events 为最新在前）。
+
+    合并条件：相邻两条间隔 ≤ seconds 且整组跨度 ≤ MERGE_SPAN_LIMIT；seconds ≤ 0 表示不合并。
+    """
+    if seconds <= 0:
+        return [[event] for event in events]
+    groups: List[Dict[str, Any]] = []
+    for event in events:
+        stamp = _time_seconds(str(event.get("time") or ""))
+        key = (_merge_kind(event), _split_path(str(event.get("path") or ""))[0])
+        if groups:
+            current = groups[-1]
+            if (
+                current["key"] == key
+                and stamp is not None
+                and current["last"] is not None
+                and abs(current["last"] - stamp) <= seconds
+                and abs(current["first"] - stamp) <= MERGE_SPAN_LIMIT
+            ):
+                current["events"].append(event)
+                current["last"] = stamp
+                continue
+        groups.append({"key": key, "events": [event], "first": stamp, "last": stamp})
+    return [item["events"] for item in groups]
+
+
+def _feed_group(
+    rows: List[Dict[str, Any]], paired_acts: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """把同目录同类型的多条通知渲染成一条可展开的聚合行（方案 A）。
+
+    摘要行给出：时间范围、变更徽章、目录尾两段、文件数、完成/等待/失败计数、历时、自身生成标记；
+    含失败或等待处理的组默认展开，纯完成组默认折叠（点标题展开逐条明细）。
+    若这一组与某组操作记录对应上，摘要里再补一段「→ 记录：新增 N · 失败 N」。
+    """
+    first = rows[0]
+    path = str(first.get("path") or "")
+    directory, _ = _split_path(path)
+    done = sum(1 for item in rows if item.get("done"))
+    waiting = len(rows) - done
+    failed = sum(1 for item in rows if "失败" in str(item.get("result") or ""))
+    skipped = sum(1 for item in rows if "跳过" in str(item.get("result") or ""))
+    if failed or waiting:
+        tone = "warn"
+    elif skipped and skipped == len(rows):
+        tone = "skip"
+    else:
+        tone = "ok"
+    head: List[Dict[str, Any]] = []
+    if first.get("own_move"):
+        head.append(_chip("移入回收站", "warn"))
+    else:
+        head.append(_change_chip(str(first.get("change_type") or "")))
+    tail = "/".join([item for item in directory.split("/") if item][-2:]) or directory
+    head.append(
+        {
+            "component": "span",
+            "props": {"class": "nm", "title": directory},
+            "text": tail or "（无目录）",
+        }
+    )
+    head.append(
+        {"component": "span", "props": {"class": "cnt"}, "text": f"{len(rows)} 个文件"}
+    )
+    counts: List[Dict[str, Any]] = [
+        {
+            "component": "span",
+            "props": {"class": f"cd2strm-st {tone}".strip()},
+            "text": f"完成 {done}",
+        }
+    ]
+    if waiting:
+        counts.append(
+            {"component": "span", "props": {"class": "cd2strm-st skip"}, "text": f"待回填 {waiting}"}
+        )
+    if skipped:
+        counts.append(
+            {"component": "span", "props": {"class": "cd2strm-st skip"}, "text": f"跳过 {skipped}"}
+        )
+    if failed:
+        counts.append(
+            {"component": "span", "props": {"class": "cd2strm-st bad"}, "text": f"失败 {failed}"}
+        )
+    span = abs((_time_seconds(str(rows[0].get("time") or "")) or 0)
+               - (_time_seconds(str(rows[-1].get("time") or "")) or 0))
+    if len(rows) > 1:
+        counts.append(
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-res"},
+                "text": f"历时 {span}s",
+            }
+        )
+    if first.get("internal"):
+        counts.append(_chip("自身生成", "grey"))
+    if first.get("source"):
+        counts.append(_chip(str(first["source"]), "grey"))
+    if paired_acts:
+        counts.append(
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-link"},
+                "text": f"→ 对应记录：{_counters_text(paired_acts)}",
+            }
+        )
+    counts.append(
+        {
+            "component": "span",
+            "props": {"class": "chev"},
+            "content": [
+                {"component": "span", "props": {"class": "cd2strm-gclosed"}, "text": f"展开 {len(rows)} 条 ▾"},
+                {"component": "span", "props": {"class": "cd2strm-gopen"}, "text": f"收起 {len(rows)} 条 ▴"},
+            ],
+        }
+    )
+    times = [str(item.get("time") or "") for item in rows]
+    range_text = times[0] if len(times) == 1 else f'{times[-1].split(" ")[-1]}–{times[0].split(" ")[-1]}'
+    summary: Dict[str, Any] = {
+        "component": "summary",
+        "content": [
+            {"component": "span", "props": {"class": "tm"}, "text": range_text},
+            {
+                "component": "span",
+                "props": {"class": "rail"},
+                "content": [{"component": "span", "props": {"class": "dot"}}],
+            },
+            {
+                "component": "div",
+                "content": [
+                    {"component": "div", "props": {"class": "cd2strm-gsum"}, "content": head},
+                    {"component": "div", "props": {"class": "dr", "title": directory}, "text": directory},
+                    {"component": "div", "props": {"class": "mt"}, "content": counts},
+                ],
+            },
+        ],
+    }
+    # 合并行一律默认折叠（用户要求「默认折叠所有 CD2 通知」）；失败数在分区标题上有红徽章
+    props: Dict[str, Any] = {"class": "cd2strm-gwrap"}
+    return {
+        "component": "details",
+        "props": props,
+        "content": [
+            summary,
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-gdet"},
+                "content": [_feed_line(item) for item in rows],
+            },
+        ],
+    }
+
+
+def _merge_actions(
+    actions: List[Dict[str, Any]], seconds: int
+) -> List[List[Dict[str, Any]]]:
+    """把相邻的「同目录 + 同触发方式」操作记录合并成组（actions 为最新在前）。"""
+    if seconds <= 0:
+        return [[action] for action in actions]
+    groups: List[Dict[str, Any]] = []
+    for action in actions:
+        stamp = _time_seconds(str(action.get("time") or ""))
+        key = (str(action.get("trigger") or ""), _action_dir(action))
+        if groups:
+            current = groups[-1]
+            if (
+                current["key"] == key
+                and stamp is not None
+                and current["last"] is not None
+                and abs(current["last"] - stamp) <= seconds
+                and abs(current["first"] - stamp) <= MERGE_SPAN_LIMIT
+            ):
+                current["rows"].append(action)
+                current["last"] = stamp
+                continue
+        groups.append({"key": key, "rows": [action], "first": stamp, "last": stamp})
+    return [item["rows"] for item in groups]
+
+
+def _action_dir(action: Dict[str, Any]) -> str:
+    """操作记录的来源目录（记录里存的是源文件路径）。"""
+    return _split_path(str(action.get("path") or ""))[0]
+
+
+def _note_dir(event: Dict[str, Any]) -> str:
+    """通知对应的目录：改名事件用目标路径，其余用自身路径。
+
+    改名事件（例如从 CD2 暂存目录进媒体库）的 path 是暂存位置、new_path 才是落点，
+    操作记录里的路径是落点，所以配对要用 new_path 那一侧。
+    """
+    return _split_path(str(event.get("new_path") or event.get("path") or ""))[0]
+
+
+def _group_span(rows: List[Dict[str, Any]]) -> tuple:
+    """一组记录/通知的时间范围（秒，最早 / 最晚）。"""
+    stamps = [
+        stamp
+        for stamp in (_time_seconds(str(item.get("time") or "")) for item in rows)
+        if stamp is not None
+    ]
+    if not stamps:
+        return (None, None)
+    return (min(stamps), max(stamps))
+
+
+def _pair_groups(
+    note_groups: List[List[Dict[str, Any]]],
+    act_groups: List[List[Dict[str, Any]]],
+) -> Dict[int, List[int]]:
+    """把通知组与操作记录组按「同目录 + 时间相邻」配对。
+
+    返回 {通知组下标: [记录组下标, ...]}：同一批通知可能被拆成多段记录（中间隔着一条其它目录的
+    通知就会切开），所以一个通知组允许对应多段记录，展示时把它们的统计合计。
+    目录相同是硬条件（通知用 new_path 的目录，记录用源文件路径的目录），时间上要求两段区间
+    相差不超过 PAIR_SLACK 秒：批处理的记录往往与通知交错发生，完全不重叠也算同一批。
+    """
+    pairs: Dict[int, List[int]] = {}
+    for note_index, notes in enumerate(note_groups):
+        directory = _note_dir(notes[0])
+        note_first, note_last = _group_span(notes)
+        if not directory or None in (note_first, note_last):
+            continue
+        for act_index, acts in enumerate(act_groups):
+            if _action_dir(acts[0]) != directory:
+                continue
+            act_first, act_last = _group_span(acts)
+            if None in (act_first, act_last):
+                continue
+            if note_first - PAIR_SLACK <= act_last and act_first - PAIR_SLACK <= note_last:
+                pairs.setdefault(note_index, []).append(act_index)
+    return pairs
+
+
+def _counters_text(actions: List[Dict[str, Any]]) -> str:
+    """把一组记录的计数器加起来，生成「新增 55 · 跳过 0 · 失败 0」这样的短文案。"""
+    total: Dict[str, int] = {}
+    for action in actions:
+        for key, value in (action.get("counters") or {}).items():
+            total[key] = total.get(key, 0) + int(value or 0)
+    parts = [f"新增 {total.get('links_created', 0)}"]
+    if total.get("links_updated"):
+        parts.append(f"更新 {total['links_updated']}")
+    parts.append(f"跳过 {total.get('links_skipped', 0)}")
+    parts.append(f"失败 {total.get('links_failed', 0) + total.get('metadata_failed', 0)}")
+    if total.get("metadata_copied"):
+        parts.append(f"元数据 {total['metadata_copied']}")
+    cleaned = (
+        total.get("removed_links", 0)
+        + total.get("removed_metadata", 0)
+        + total.get("removed_dirs", 0)
+    )
+    if cleaned:
+        parts.append(f"清理 {cleaned}")
+    return " · ".join(parts)
+
+
+def _record_group(
+    rows: List[Dict[str, Any]], note_count: int = 0
+) -> Dict[str, Any]:
+    """把同目录同触发方式的多条操作记录渲染成一条可展开的聚合行。"""
+    first = rows[0]
+    directory = _action_dir(first)
+    total = len(rows)
+    failed = sum(1 for item in rows if item.get("error"))
+    failed += sum(
+        1
+        for item in rows
+        for key in ("links_failed", "metadata_failed")
+        if int((item.get("counters") or {}).get(key) or 0)
+    )
+    tone = "bad" if failed else "ok"
+    tail = "/".join([part for part in directory.split("/") if part][-2:]) or directory
+    head: List[Dict[str, Any]] = [
+        _chip("事件" if str(first.get("trigger")) == "event" else "手动", "grey"),
+        {"component": "span", "props": {"class": "nm", "title": directory}, "text": tail or "（无目录）"},
+        {"component": "span", "props": {"class": "cnt"}, "text": f"{total} 次"},
+    ]
+    meta: List[Dict[str, Any]] = [
+        {
+            "component": "span",
+            "props": {"class": f"cd2strm-st {tone}".strip()},
+            "text": _counters_text(rows),
+        }
+    ]
+    first_sec, last_sec = _group_span(rows)
+    if total > 1 and first_sec is not None and last_sec is not None:
+        meta.append(
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-res"},
+                "text": f"历时 {abs(first_sec - last_sec)}s",
+            }
+        )
+    if note_count:
+        meta.append(
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-link"},
+                "text": f"← 对应通知 {note_count} 条",
+            }
+        )
+    meta.append(
+        {
+            "component": "span",
+            "props": {"class": "chev"},
+            "content": [
+                {"component": "span", "props": {"class": "cd2strm-gclosed"}, "text": f"展开 {total} 条 ▾"},
+                {"component": "span", "props": {"class": "cd2strm-gopen"}, "text": f"收起 {total} 条 ▴"},
+            ],
+        }
+    )
+    times = [str(item.get("time") or "") for item in rows]
+    range_text = times[0] if len(times) == 1 else f'{times[-1].split(" ")[-1]}–{times[0].split(" ")[-1]}'
+    props: Dict[str, Any] = {"class": "cd2strm-gwrap"}
+    if failed:
+        props["open"] = True
+    return {
+        "component": "details",
+        "props": props,
+        "content": [
+            {
+                "component": "summary",
+                "content": [
+                    {"component": "span", "props": {"class": "tm"}, "text": range_text},
+                    {
+                        "component": "span",
+                        "props": {"class": "rail"},
+                        "content": [{"component": "span", "props": {"class": "dot"}}],
+                    },
+                    {
+                        "component": "div",
+                        "content": [
+                            {"component": "div", "props": {"class": "cd2strm-gsum"}, "content": head},
+                            {"component": "div", "props": {"class": "dr", "title": directory}, "text": directory},
+                            {"component": "div", "props": {"class": "mt"}, "content": meta},
+                        ],
+                    },
+                ],
+            },
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-gdet"},
+                "content": [_record_line(item) for item in rows],
+            },
+        ],
+    }
+
+
+def _sync_feed(
+    page: int,
+    page_size: int,
+    groups: List[List[Dict[str, Any]]],
+    pairs: Optional[Dict[int, List[int]]] = None,
+    act_groups: Optional[List[List[Dict[str, Any]]]] = None,
+    empty_hint: str = "",
+) -> Dict[str, Any]:
+    """本组的 CD2 通知流：按合并窗口折叠同目录同类型的相邻通知，分页按合并后的条目算。"""
+    pairs = pairs or {}
+    total = sum(len(group) for group in groups)
+    page = _clamp_page(page, page_size, len(groups))
+    start = max(0, (page - 1) * page_size)
+    window = list(enumerate(groups))[start : start + page_size]
+    items: List[Dict[str, Any]] = []
+    for index, group in window:
+        if len(group) == 1:
+            items.append(_feed_line(group[0]))
+            continue
+        paired: List[Dict[str, Any]] = []
+        for act_index in pairs.get(index, []):
+            if act_groups and 0 <= act_index < len(act_groups):
+                paired.extend(act_groups[act_index])
+        items.append(_feed_group(group, paired or None))
+    if not items:
+        items = [
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-hint"},
+                "text": empty_hint or "暂无通知：CloudDrive2 只在变更经由它自身发生时推送。",
+            }
+        ]
+    shown = sum(len(group) for _, group in window)
+    failed = sum(
+        1 for _, group in window for event in group if "失败" in str(event.get("result") or "")
+    )
+    head_content: List[Dict[str, Any]] = [
+        {"component": "span", "props": {"class": "cd2strm-fh"}, "text": "CD2 通知"},
+        _chip(f"共 {total} 条", "grey"),
+    ]
+    if len(groups) < total:
+        head_content.append(_chip(f"合并为 {len(groups)} 组", "primary"))
+    if failed:
+        # 折叠起来也要能看出有没有失败
+        head_content.append(_chip(f"失败 {failed}", "error"))
+    head_content.append(
+        {
+            "component": "span",
+            "props": {"class": "cd2strm-count"},
+            "text": f"已显示最新 {shown} 条",
+        }
+    )
+    # 默认折叠：标题行本身就是 summary，点开才看明细（三个视图一致）
+    return {
+        "component": "details",
+        "props": {"class": "cd2strm-fold cd2strm-fsec"},
+        "content": [
+            {"component": "summary", "props": {"class": "cd2strm-fhead"}, "content": head_content},
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-feed", "style": dict(FEED_BOX_STYLE)},
+                "content": items,
+            },
+        ],
+    }
+
+
+def _record_line(action: Dict[str, Any]) -> Dict[str, Any]:
+    """把一条操作记录渲染成活动流行：时间 / 轴点 / 触发+统计 / 生成文件。"""
+    text = str(action.get("summary") or "")
+    error = str(action.get("error") or "")
+    files = list(action.get("files") or [])
+    file_nodes: List[Dict[str, Any]] = [
+        {"component": "div", "props": {"class": "cd2strm-pth", "title": item}, "text": item}
+        for item in files[:5]
+    ]
+    if len(files) > 5:
+        file_nodes.append(
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-count"},
+                "text": f"其余 {len(files) - 5} 个已省略",
+            }
+        )
+    if not file_nodes:
+        file_nodes.append({"component": "div", "props": {"class": "cd2strm-count"}, "text": "—"})
+    tone = "bad" if error else "ok"
+    meta: List[Dict[str, Any]] = [
+        {
+            "component": "span",
+            "props": {"class": f"cd2strm-st {tone}".strip()},
+            "text": "出错" if error else "完成",
+        },
+        {
+            "component": "span",
+            "props": {"class": "cd2strm-res", "title": text},
+            "text": text or "无变化",
+        },
+    ]
+    if error:
+        meta.append(
+            {
+                "component": "span",
+                "props": {"class": "cd2strm-res cd2strm-bad", "title": error},
+                "text": f"错误：{error}",
+            }
+        )
+    return {
+        "component": "div",
+        "props": {"class": f"cd2strm-fi {tone}".strip()},
+        "content": [
+            {"component": "span", "props": {"class": "tm"}, "text": str(action.get("time") or "")},
+            {
+                "component": "span",
+                "props": {"class": "rail"},
+                "content": [{"component": "span", "props": {"class": "dot"}}],
+            },
+            {
+                "component": "div",
+                "props": {"class": "bd"},
+                "content": [
+                    {
+                        "component": "div",
+                        "props": {"class": "top"},
+                        "content": [
+                            _chip(str(action.get("trigger") or "事件"), "grey"),
+                            {
+                                "component": "span",
+                                "props": {"class": "nm"},
+                                "text": str(action.get("rule") or "本组"),
+                            },
+                        ],
+                    },
+                    {"component": "div", "props": {"class": "mt"}, "content": meta},
+                    {"component": "div", "props": {"class": "files"}, "content": file_nodes},
+                ],
+            },
+        ],
+    }
+
+
+def _record_feed(
+    page: int,
+    page_size: int,
+    groups: List[List[Dict[str, Any]]],
+    reverse_pairs: Optional[Dict[int, int]] = None,
+    note_groups: Optional[List[List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
+    """本组的操作记录流：同目录同触发方式的相邻记录折叠成一条聚合并行，分页按组算。"""
+    reverse_pairs = reverse_pairs or {}
+    total = sum(len(group) for group in groups)
+    page = _clamp_page(page, page_size, len(groups))
+    start = max(0, (page - 1) * page_size)
+    window = list(enumerate(groups))[start : start + page_size]
+    items: List[Dict[str, Any]] = []
+    for index, group in window:
+        if len(group) == 1:
+            items.append(_record_line(group[0]))
+            continue
+        note_count = 0
+        if index in reverse_pairs and note_groups:
+            note_count = len(note_groups[reverse_pairs[index]])
+        items.append(_record_group(group, note_count))
+    if not items:
+        items = [{"component": "div", "props": {"class": "cd2strm-hint"}, "text": "暂无操作记录"}]
+    shown = sum(len(group) for _, group in window)
+    head_content: List[Dict[str, Any]] = [
+        {"component": "span", "props": {"class": "cd2strm-fh"}, "text": "操作记录"},
+        _chip(f"共 {total} 条", "grey"),
+    ]
+    if len(groups) < total:
+        head_content.append(_chip(f"合并为 {len(groups)} 组", "primary"))
+    head_content.append(
+        {
+            "component": "span",
+            "props": {"class": "cd2strm-count"},
+            "text": f"已显示最新 {shown} 条",
+        }
+    )
+    return {
+        "component": "div",
+        "props": {"class": "cd2strm-fsec"},
+        "content": [
+            {"component": "div", "props": {"class": "cd2strm-fhead"}, "content": head_content},
+            {
+                "component": "div",
+                "props": {"class": "cd2strm-feed", "style": dict(FEED_BOX_STYLE)},
+                "content": items,
+            },
         ],
     }
 
@@ -2662,7 +3909,11 @@ def _pager(
     page_size: int,
     total: int,
 ) -> Dict[str, Any]:
-    """构造消息显示范围控制条：每页条数 + 上一页 / 下一页。"""
+    """构造消息显示范围控制条：每页组数 + 上一页 / 下一页。
+
+    合并显示之后，翻页单位是「合并后的条目（组）」而不是原始条数；
+    各分区标题里已经写明「共 N 条 · 合并为 M 组 · 已显示最新 X 条」，这里只报页码与每页组数。
+    """
     api = f"plugin/{plugin_id}/display?apikey={api_token}"
     sizes: List[Dict[str, Any]] = []
     for size in (5, 10, 20, 30, 50, 100):
@@ -2702,7 +3953,8 @@ def _pager(
             {
                 "component": "span",
                 "props": {"class": "pos"},
-                "text": f"第 {page} / {max_page} 页（共 {total} 条）",
+                # 合并之后翻页按「组」算：这里写清每页多少组，别再拿组数冒充条数
+                "text": f"第 {page} / {max_page} 页（每页 {page_size} 组 · 共 {total} 组）",
             },
             {
                 "component": "span",
@@ -2959,7 +4211,7 @@ def _unmatched_card(
                         "text": f"{len(items)} 条",
                     },
                 ],
-                body=[_event_line(event) for event in items],
+                body=[_feed_line(event) for event in items],
                 opened=position == 0 and category != "internal",
                 css="cd2strm-nested",
             )
