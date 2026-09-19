@@ -277,8 +277,8 @@ class Cd2StrmSync(_PluginBase):
         "可另按独立的整理规则把文件交给 MoviePilot 整理链入库；还可按镜像规则把镜像目录中对应的"
         "对象移到回收站（保护白名单命中的对象不移动）。三者互不影响，共用通知。"
     )
-    plugin_icon = "https://raw.githubusercontent.com/thsrite/MoviePilot-Plugins/main/icons/create.png"
-    plugin_version = "1.34.0"
+    plugin_icon = "https://raw.githubusercontent.com/mtno1/MoviePilot-Plugins/main/icons/cd2strmsync.png"
+    plugin_version = "1.34.1"
     plugin_author = "mtno1"
     plugin_label = "云盘"
     plugin_config_prefix = "cd2strmsync_"
